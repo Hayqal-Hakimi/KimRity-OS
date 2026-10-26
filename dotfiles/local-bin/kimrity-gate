@@ -52,6 +52,13 @@ ts="$(date -u +%Y%m%dT%H%M%SZ)"
 out="$HOME/.local/share/kimrity/gate/$ts"
 mkdir -p "$out" || emit_error "tidak dapat mencipta folder keluaran: $out"
 
+# CLI (trivy) cari config dalam CWD; CWD warisan boleh jadi /root → "permission denied".
+# Jalankan dari $HOME dan pastikan sasaran repo ialah laluan mutlak.
+if [ "$kind" = "repo" ]; then
+    target="$(readlink -f "$target" 2>/dev/null || printf '%s' "$target")"
+fi
+cd "$HOME" 2>/dev/null || cd /
+
 json_path="$out/gate.json"
 log_path="$out/.gate.log"
 err_path="$out/.gate.err"
@@ -120,7 +127,8 @@ except Exception as exc:  # noqa: BLE001 - laporkan, jangan teka
 
 errors = result.get("tool_errors") or {}
 tools = (result.get("meta") or {}).get("tools") or {}
-for name in tools:
+names = list(tools) + [name for name in errors if name not in tools]
+for name in names:
     status = "failed" if name in errors else "done"
     row = {"phase": "scanner", "name": name, "status": status}
     if status == "failed":

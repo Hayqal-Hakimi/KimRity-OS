@@ -89,6 +89,7 @@ ShellRoot {
     property string gateJsonPending: ""
     property var gateHistory: []
     property bool gateHistoryLoading: false
+    property int gateExitCode: 0
     readonly property string gateHistoryDir: homeDir + "/.local/share/kimrity/gate"
     readonly property bool gateCanRun: root.gateTarget.trim().length > 0
         && !root.gateRunning
@@ -243,6 +244,20 @@ fi
             onStreamFinished: root.gateHistoryReady(gateHistoryOut.text)
         }
         onExited: if (root.gateHistoryLoading) root.gateHistoryReady("")
+    }
+
+    // Beri peluang baris NDJSON terakhir diproses sebelum menganggap proses
+    // habis tanpa keputusan.
+    Timer {
+        id: gateExitTimer
+        interval: 150
+        repeat: false
+        onTriggered: {
+            if (!root.gateRunning) return
+            root.gateRunning = false
+            if (!root.gateDone && root.gateError === "")
+                root.gateError = "Scan berhenti (exit " + root.gateExitCode + ")"
+        }
     }
 
     function loadTools() {
@@ -463,10 +478,8 @@ fi
     }
 
     function gateExited(code) {
-        if (!root.gateRunning) return
-        root.gateRunning = false
-        if (!root.gateDone && root.gateError === "")
-            root.gateError = "Scan berhenti (exit " + code + ")"
+        root.gateExitCode = code
+        gateExitTimer.restart()
     }
 
     function loadGateJson(path) {
@@ -1141,7 +1154,7 @@ fi
                     radius: 11
                     color: "#0a0f1e"
 
-                    readonly property int scannerH: (root.gateRunning || root.gateScanners.length > 0) ? 74 : 0
+                    readonly property int scannerH: (root.gateRunning || root.gateScanners.length > 0) ? 94 : 0
 
                     // telan klik kosong supaya tidak tembus ke dashboard di belakang
                     MouseArea { anchors.fill: parent; onClicked: {} }
@@ -1201,6 +1214,7 @@ fi
                                     selectByMouse: true
                                     font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
                                     onTextChanged: root.gateTarget = text
+                                    focus: root.gatePage && root.isOpen
                                     Keys.onPressed: (e) => {
                                         if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
                                             root.startGate()
@@ -1362,6 +1376,21 @@ fi
                                                     font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 14
                                                     font.bold: true
                                                 }
+                                            }
+                                        }
+                                        Column {
+                                            visible: root.gateCount("critical") > 0
+                                            spacing: 2
+                                            Text {
+                                                text: "CRIT"
+                                                color: "#5f6c8c"
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                            }
+                                            Text {
+                                                text: root.gateCount("critical")
+                                                color: root.gateSevColor("critical")
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 14
+                                                font.bold: true
                                             }
                                         }
                                     }
@@ -1685,7 +1714,7 @@ fi
                                         color: "#dbe3f4"
                                         font.family: "JetBrainsMono Nerd Font"
                                         font.pixelSize: 11
-                                        focus: root.isOpen
+                                        focus: root.isOpen && !root.gatePage
                                         onTextChanged: { root.filter = text; root.appIndex = 0 }
                                         Keys.onPressed: (e) => root.handleKey(e)
                                         Text { visible: parent.text.length === 0; text: "Search…"; color: "#5b6784"; font: parent.font }
@@ -1798,6 +1827,7 @@ fi
                                         root.editPreset = ""
                                         root.noteEdit = false
                                         root.notesMenuOpen = false
+                                        root.setOpen = false
                                         root.gatePage = true
                                         root.refreshGateHistory()
                                     }
