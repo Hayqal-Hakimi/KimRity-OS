@@ -1,0 +1,7 @@
+NAME="KimRity"
+PRETTY_NAME="KimRity (Arch-based security workstation)"
+ID=kimrity
+ID_LIKE=arch
+BUILD_ID=rolling
+ANSI_COLOR="38;2;23;147;209"
+LOGO=kimrity

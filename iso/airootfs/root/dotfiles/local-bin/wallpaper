@@ -1,0 +1,4 @@
+#!/bin/sh
+# wallpaper — latar pepejal KimRity (elak masalah quoting '#' dalam hyprland.conf).
+pkill -x swaybg 2>/dev/null
+exec swaybg -c '#1e1e2e'

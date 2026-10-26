@@ -1,0 +1,52 @@
+/* ~/.config/wofi/style.css — KimRity menu */
+* {
+    font-family: "JetBrainsMono Nerd Font", monospace;
+    font-size: 14px;
+}
+
+window {
+    width: 460px;
+    background-color: rgba(24, 24, 37, 0.94);
+    border: 1px solid rgba(137, 180, 250, 0.35);
+    border-radius: 14px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+#outer-box {
+    margin: 10px;
+}
+
+#input {
+    margin: 4px 6px 10px 6px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: none;
+    background-color: rgba(49, 50, 68, 0.85);
+    color: #cdd6f4;
+}
+
+#inner-box {
+    margin: 0 4px;
+}
+
+#entry {
+    padding: 9px 12px;
+    border-radius: 9px;
+    color: #cdd6f4;
+}
+
+#entry:selected {
+    background-color: rgba(137, 180, 250, 0.16);
+}
+
+#text {
+    color: #cdd6f4;
+}
+
+#text:selected {
+    color: #89b4fa;
+}
+
+#img {
+    padding-right: 10px;
+}

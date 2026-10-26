@@ -1,0 +1,16 @@
+
+  ┌─────────────────────────────────────────────────────┐
+  │  KimRity — Arch + Hyprland security workstation     │
+  └─────────────────────────────────────────────────────┘
+
+  Pasang ke disk (AMARAN: disk itu akan dipadam):
+
+      bash /root/install.sh --disk /dev/vda --efi
+
+  Kandungan /root:
+      install.sh     pemasang (9 langkah, ada guard)
+      dotfiles/      Hyprland, kitty, waybar, bash_profile
+      hardening/     auditd rules, sysctl, sshd
+      lab/           artifak #1 (rule SSH brute-force + laporan + bukti)
+
+  Selepas pasang: tetapkan password sendiri, kemudian reboot.

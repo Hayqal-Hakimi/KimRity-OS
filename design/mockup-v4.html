@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<title>KimRity — menu (mockup v4, padat)</title>
+<style>
+  :root{
+    --bg:#0a0f1e; --panel:#101728; --panel2:#0d1424; --line:#1a2336;
+    --txt:#dbe3f4; --dim:#94a1c0; --mute:#5b6784; --acc:#4fd1c5;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{width:900px;height:560px;background:var(--bg);overflow:hidden}
+  .screen{
+    width:900px;height:560px;background:var(--bg);color:var(--txt);
+    font-family:"JetBrains Mono",ui-monospace,"DejaVu Sans Mono",monospace;
+    display:flex;gap:8px;padding:8px;
+  }
+  .panel{background:var(--panel);border-radius:11px;padding:10px 12px;display:flex;flex-direction:column;min-height:0}
+  .ptitle{display:flex;align-items:center;font-size:11.5px;color:#b9c6e2;margin-bottom:8px;letter-spacing:.02em}
+  .sp{flex:1}
+  .muted{color:var(--mute);font-size:9.5px}
+
+  /* sidebar */
+  .side{width:168px;flex:0 0 168px;gap:2px}
+  .search{display:flex;align-items:center;gap:7px;background:var(--panel2);border-radius:7px;padding:7px 9px;font-size:11px;color:var(--mute);margin-bottom:9px}
+  .qs{display:flex;align-items:center;gap:8px;background:#182236;border-left:2px solid var(--acc);border-radius:6px;padding:7px 9px;font-size:11px;color:#e7eeff;margin-bottom:5px}
+  .cat{display:flex;align-items:center;gap:8px;padding:5px 9px;font-size:11px;color:#93a1c0;border-radius:6px}
+  .cat .ic{width:13px;text-align:center;color:#66738f;font-size:11px}
+  .grow{flex:1}
+
+  /* main */
+  .main{flex:1;display:flex;flex-direction:column;gap:8px;min-height:0}
+
+  /* workspaces row */
+  .ws{display:flex;gap:14px;align-items:flex-start}
+  .wsitem{display:flex;flex-direction:column;align-items:center;gap:5px;width:104px}
+  .cluster{position:relative;width:84px;height:84px;border-radius:50%;background:#e9ecf5;
+           display:grid;grid-template-columns:repeat(2,1fr);place-items:center;padding:12px;
+           box-shadow:0 6px 16px rgba(0,0,0,.4)}
+  .cluster.on{outline:2px solid var(--acc);outline-offset:3px}
+  .ico{width:18px;height:18px;border-radius:4px;display:grid;place-items:center;font-size:7.5px;font-weight:700;color:#0a0f1e}
+  .cluster .ico{width:20px;height:20px;font-size:8px;border-radius:5px}
+  .badge{position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;border-radius:50%;
+         background:#e8443a;color:#fff;display:grid;place-items:center;font-size:10px;font-weight:700;border:2px solid #0a0f1e}
+  .wsname{font-size:10.5px;color:#c9d4ec}
+  .wskey{font-size:9.5px;color:var(--acc)}
+
+  /* apps 2 columns */
+  .apps{flex:0 0 auto}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;column-gap:14px;min-height:0}
+  .row{display:flex;align-items:center;gap:8px;height:26px;font-size:11px;color:#c3cde6}
+
+  /* bottom strip */
+  .bottom{display:flex;gap:8px;flex:1;min-height:0}
+  .bottom .panel{flex:1}
+  .file{display:flex;flex-direction:column;padding:3px 0}
+  .fname{font-size:10.5px;color:#c9d4ec}
+  .fmeta{font-size:9px;color:var(--mute)}
+  .note{font-size:10px;color:#93a0be;padding:3px 0}
+  .live{font-size:9px;color:var(--acc);border:1px solid rgba(79,209,197,.45);border-radius:999px;padding:1px 7px}
+</style>
+</head>
+<body>
+<div class="screen">
+
+  <!-- sidebar -->
+  <div class="panel side">
+    <div class="search"><span>⌕</span><span>Search…</span></div>
+    <div class="qs"><span>▦</span><span>Quick access</span></div>
+    <div class="cat"><span class="ic">‹</span><span>Development</span></div>
+    <div class="cat"><span class="ic">◉</span><span>Web &amp; Browser</span></div>
+    <div class="cat"><span class="ic">⛨</span><span>Security</span></div>
+    <div class="cat"><span class="ic">⚙</span><span>Engineering</span></div>
+    <div class="cat"><span class="ic">▤</span><span>System</span></div>
+    <div class="cat"><span class="ic">▥</span><span>Office</span></div>
+    <div class="cat"><span class="ic">◍</span><span>Multimedia</span></div>
+    <div class="cat"><span class="ic">▣</span><span>Utilities</span></div>
+    <div class="grow"></div>
+    <div class="cat"><span class="ic">⚙</span><span>Settings</span></div>
+  </div>
+
+  <!-- main -->
+  <div class="main">
+
+    <!-- workspaces: sebaris -->
+    <div class="panel">
+      <div class="ptitle">Workspace<span class="sp"></span><span class="muted">F1–F3: lancar semua app ke workspace 1–3</span></div>
+      <div class="ws">
+        <div class="wsitem">
+          <div class="cluster on">
+            <span class="badge">6</span>
+            <span class="ico" style="background:#7ee787">›_</span>
+            <span class="ico" style="background:#ff7139">FF</span>
+            <span class="ico" style="background:#b57bff">VM</span>
+            <span class="ico" style="background:#6ea8fe">nv</span>
+          </div>
+          <div class="wsname">Study</div><div class="wskey">F1</div>
+        </div>
+
+        <div class="wsitem">
+          <div class="cluster">
+            <span class="badge">5</span>
+            <span class="ico" style="background:#b57bff">VM</span>
+            <span class="ico" style="background:#9ad0ff">qz</span>
+            <span class="ico" style="background:#f5c451">bt</span>
+            <span class="ico" style="background:#ff8b5e">bp</span>
+          </div>
+          <div class="wsname">Lab</div><div class="wskey">F2</div>
+        </div>
+
+        <div class="wsitem">
+          <div class="cluster">
+            <span class="badge">4</span>
+            <span class="ico" style="background:#ff7139">FF</span>
+            <span class="ico" style="background:#ff4d6d">YT</span>
+            <span class="ico" style="background:#7ee787">›_</span>
+            <span class="ico" style="background:#b57bff">GPT</span>
+          </div>
+          <div class="wsname">Web</div><div class="wskey">F3</div>
+        </div>
+
+        <div class="grow"></div>
+      </div>
+    </div>
+
+    <!-- apps: dua lajur -->
+    <div class="panel apps">
+      <div class="ptitle">Apps<span class="sp"></span><span class="muted">2 lajur</span></div>
+      <div class="grid2">
+        <div class="row"><span class="ico" style="background:#ff7139">FF</span>Firefox</div>
+        <div class="row"><span class="ico" style="background:#b57bff">nm</span>nmap</div>
+        <div class="row"><span class="ico" style="background:#3aa0ff">VS</span>VS Code</div>
+        <div class="row"><span class="ico" style="background:#6ea8fe">ws</span>Wireshark</div>
+        <div class="row"><span class="ico" style="background:#7ee787">›_</span>Kitty</div>
+        <div class="row"><span class="ico" style="background:#ff8b5e">bp</span>Burp Suite</div>
+        <div class="row"><span class="ico" style="background:#f5c451">bt</span>btop</div>
+        <div class="row"><span class="ico" style="background:#9ad0ff">qz</span>qemu</div>
+        <div class="row"><span class="ico" style="background:#d6a2ff">yazi</span>yazi</div>
+        <div class="row"><span class="ico" style="background:#ff9f6e">gd</span>ghidra</div>
+        <div class="row"><span class="ico" style="background:#ff6b6b">ms</span>metasploit</div>
+        <div class="row"><span class="ico" style="background:#8be9fd">r2</span>radare2</div>
+      </div>
+    </div>
+
+    <!-- bottom: recent + notes -->
+    <div class="bottom">
+      <div class="panel">
+        <div class="ptitle">Recent Files</div>
+        <div class="file"><div class="fname">report-gate-2026-10.md</div><div class="fmeta">~/Documents/kimrity · 20:41</div></div>
+        <div class="file"><div class="fname">hyprland.conf</div><div class="fmeta">~/.config/hypr · 20:32</div></div>
+        <div class="file"><div class="fname">audit.log</div><div class="fmeta">/var/log/audit · 18:04</div></div>
+        <div class="file"><div class="fname">shell.qml</div><div class="fmeta">~/.config/quickshell/kimrity · 19:57</div></div>
+      </div>
+
+      <div class="panel">
+        <div class="ptitle">Notes<span class="sp"></span><span class="live">AI · live</span></div>
+        <div class="note">☐ Rekod verdict Gate</div>
+        <div class="note">☑ 12 rules audit aktif</div>
+        <div class="note">☐ Laporan SOC L1 (hari 3)</div>
+        <div class="note">☐ Semak keybind SUPER+F1…F3</div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</body>
+</html>

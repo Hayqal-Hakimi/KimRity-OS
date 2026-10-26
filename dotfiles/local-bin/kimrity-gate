@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# kimrity-gate — NDJSON wrapper untuk KimRity Security Gate CLI.
+#
+# Penggunaan:
+#   kimrity-gate <repo|web|server> <sasaran> [authorized]
+#
+# Setiap baris stdout ialah satu objek JSON (NDJSON) supaya panel Quickshell
+# boleh memaparkan kemajuan scanner. Keputusan akhir dibaca daripada gate.json
+# sebenar — tiada dapatan direka.
+set -u
+
+kind="${1:-}"
+target="${2:-}"
+auth="${3:-}"
+
+json_str() {
+    python3 -c 'import json, sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"
+}
+
+emit_error() {
+    printf '{"phase":"error","message":%s}\n' "$(json_str "$1")"
+    exit 2
+}
+
+if [ -z "$kind" ] || [ -z "$target" ]; then
+    emit_error "penggunaan: kimrity-gate <repo|web|server> <sasaran> [authorized]"
+fi
+
+case "$kind" in
+    repo|web|server) ;;
+    *) emit_error "jenis tidak sah: $kind (guna repo|web|server)" ;;
+esac
+
+if { [ "$kind" = "web" ] || [ "$kind" = "server" ]; } && [ "$auth" != "authorized" ]; then
+    emit_error "imbasan $kind perlukan argumen 'authorized'"
+fi
+
+# Resolve CLI. Jangan guna `command -v kimrity-gate` — itu skrip ini sendiri.
+cli="${KIMRITY_GATE_CLI:-/usr/local/bin/kimrity-gate}"
+cli_cmd=()
+if [ -x "$cli" ] && [ ! -d "$cli" ]; then
+    cli_cmd=("$cli")
+elif [ -f "$cli" ] && [ "${cli##*.}" = "py" ]; then
+    cli_cmd=(python3 "$cli")
+elif [ -f "$HOME/Documents/projects/os-security-ai/gate/gate.py" ]; then
+    cli_cmd=(python3 "$HOME/Documents/projects/os-security-ai/gate/gate.py")
+else
+    emit_error "CLI KimRity Gate tidak dijumpai (tetapkan KIMRITY_GATE_CLI)"
+fi
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+out="$HOME/.local/share/kimrity/gate/$ts"
+mkdir -p "$out" || emit_error "tidak dapat mencipta folder keluaran: $out"
+
+json_path="$out/gate.json"
+log_path="$out/.gate.log"
+err_path="$out/.gate.err"
+
+printf '{"phase":"start","kind":%s,"target":%s,"out":%s}\n' \
+    "$(json_str "$kind")" "$(json_str "$target")" "$(json_str "$out")"
+
+cli_args=(--kind "$kind" --out "$out")
+if [ "$auth" = "authorized" ]; then
+    cli_args+=(--authorized)
+fi
+
+# Baris `[gate] <nama> ...` daripada CLI menandakan scanner bermula. Scanner
+# sebelumnya dianggap selesai; status gagal yang sebenar dibetulkan selepas
+# gate.json dibaca.
+prev=""
+"${cli_cmd[@]}" "${cli_args[@]}" "$target" 2>"$err_path" | while IFS= read -r line; do
+    printf '%s\n' "$line" >>"$log_path"
+
+    name=""
+    case "$line" in
+        "[gate] "*" ...")
+            name="${line#\[gate\] }"
+            name="${name% ...}"
+            ;;
+    esac
+
+    if [ -n "$name" ]; then
+        if [ -n "$prev" ]; then
+            printf '{"phase":"scanner","name":%s,"status":"done"}\n' "$(json_str "$prev")"
+        fi
+        printf '{"phase":"scanner","name":%s,"status":"running"}\n' "$(json_str "$name")"
+        prev="$name"
+    fi
+done
+cli_rc=${PIPESTATUS[0]}
+
+if [ ! -f "$json_path" ]; then
+    python3 - "$err_path" "$cli_rc" <<'PY'
+import json, sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+        lines = [ln.strip() for ln in fh if ln.strip()]
+except OSError:
+    lines = []
+
+reason = lines[-1] if lines else "CLI gagal tanpa output (rc=%s)" % sys.argv[2]
+print(json.dumps({"phase": "error", "message": reason[:300]}))
+PY
+    exit 2
+fi
+
+# Status scanner + keputusan akhir: semuanya daripada gate.json sebenar.
+python3 - "$json_path" "$out" <<'PY'
+import json
+import sys
+
+path, out = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        result = json.load(fh)
+except Exception as exc:  # noqa: BLE001 - laporkan, jangan teka
+    print(json.dumps({"phase": "error", "message": "gate.json tidak sah: %s" % exc}))
+    raise SystemExit(2)
+
+errors = result.get("tool_errors") or {}
+tools = (result.get("meta") or {}).get("tools") or {}
+for name in tools:
+    status = "failed" if name in errors else "done"
+    row = {"phase": "scanner", "name": name, "status": status}
+    if status == "failed":
+        reason = str(errors.get(name, "")).splitlines()
+        row["reason"] = (reason[0] if reason else "gagal")[:300]
+    print(json.dumps(row), flush=True)
+
+counts = result.get("counts") or {}
+print(json.dumps({
+    "phase": "done",
+    "verdict": result.get("verdict", ""),
+    "counts": {k: int(counts.get(k, 0) or 0) for k in ("high", "medium", "low")},
+    "out": out,
+    "json": path,
+}), flush=True)
+PY
+parse_rc=$?
+
+if [ "$parse_rc" -ne 0 ]; then
+    exit 2
+fi
+
+exit 0

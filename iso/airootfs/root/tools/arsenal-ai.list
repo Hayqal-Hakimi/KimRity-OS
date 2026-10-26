@@ -1,0 +1,11 @@
+# Arsenal KimRity — tool AI security (opsyenal: install.sh --ai)
+# Berat: garak 6.4 GB venv + torch/CUDA, promptfoo 1.7 GB.
+# cai dan promptfoo ROSAK pada sistem ini:
+#   cai      -> uvloop tak boleh kompil pada Python 3.14
+#   promptfoo-> ERR_DLOPEN_FAILED (modul native lawan Node 26)
+garak
+promptfoo
+adversarial-robustness-toolbox
+cleverhans
+cai
+evil-opencode

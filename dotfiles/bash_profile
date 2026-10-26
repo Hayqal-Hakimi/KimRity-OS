@@ -1,0 +1,7 @@
+# ~/.bash_profile — autostart Hyprland pada tty1 sahaja (minimal, KimRity)
+# Syarat: konsol fizikal tty1 (bukan SSH, bukan sesi grafik), dan Hyprland belum berjalan.
+if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ] \
+   && [ -z "${SSH_CONNECTION:-}" ] && [ "$(tty)" = "/dev/tty1" ] \
+   && ! pgrep -x Hyprland >/dev/null 2>&1; then
+    exec Hyprland
+fi

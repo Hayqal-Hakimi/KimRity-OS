@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# kimrity-menu — menu utama KimRity (tampilan dahulu, isi menyusul)
+# Gaya: wofi dmenu, ikon Nerd Font, submenu bertingkat.
+set -uo pipefail
+
+WOFI=(wofi --dmenu -i --cache-file /dev/null
+      --conf "$HOME/.config/wofi/menu.conf"
+      --style "$HOME/.config/wofi/style.css")
+
+pick() {  # $1 prompt; stdin senarai
+  "${WOFI[@]}" -p "$1"
+}
+
+todo() { notify-send "KimRity" "Belum diisi: $1" 2>/dev/null || true; }
+
+BACK="    Kembali"
+
+# --------------------------------------------------------------- submenu
+sub_learn() {
+  sel=$(printf '%s\n' "    SPM" "    Cybersecurity" "    Nota" "$BACK" | pick "Learn")
+  case "${sel:-}" in
+    *SPM*)          todo "Learn → SPM" ;;
+    *Cybersecurity*) todo "Learn → Cybersecurity" ;;
+    *Nota*)         todo "Learn → Nota" ;;
+    *Kembali*)      main_menu ;;
+  esac
+}
+
+sub_trigger() {
+  sel=$(printf '%s\n' "    Lab" "    Scan" "    Gate" "$BACK" | pick "Trigger")
+  case "${sel:-}" in
+    *Lab*)      todo "Trigger → Lab" ;;
+    *Scan*)     todo "Trigger → Scan" ;;
+    *Gate*)     todo "Trigger → Gate" ;;
+    *Kembali*)  main_menu ;;
+  esac
+}
+
+sub_style() {
+  sel=$(printf '%s\n' "    Wallpaper" "    Tema" "    Waybar" "    Terminal" "$BACK" | pick "Style")
+  case "${sel:-}" in
+    *Wallpaper*)  todo "Style → Wallpaper" ;;
+    *Tema*)       todo "Style → Tema" ;;
+    *Waybar*)     todo "Style → Waybar" ;;
+    *Terminal*)   todo "Style → Terminal" ;;
+    *Kembali*)    main_menu ;;
+  esac
+}
+
+sub_setup() {
+  sel=$(printf '%s\n' "    Hyprland" "    Waybar" "    Kitty" "    Neovim" "$BACK" | pick "Setup")
+  case "${sel:-}" in
+    *Hyprland*)  exec kitty -e nvim "$HOME/.config/hypr/hyprland.conf" ;;
+    *Waybar*)    exec kitty -e nvim "$HOME/.config/waybar/config.jsonc" ;;
+    *Kitty*)     exec kitty -e nvim "$HOME/.config/kitty/kitty.conf" ;;
+    *Neovim*)    exec kitty -e nvim "$HOME/.config/nvim/init.lua" ;;
+    *Kembali*)   main_menu ;;
+  esac
+}
+
+sub_install() {
+  sel=$(printf '%s\n' "    Pacman" "    BlackArch" "$BACK" | pick "Install")
+  case "${sel:-}" in
+    *Pacman*)     exec kitty -e sudo pacman -S --needed ;;
+    *BlackArch*)  todo "Install → BlackArch" ;;
+    *Kembali*)    main_menu ;;
+  esac
+}
+
+sub_remove() {
+  sel=$(printf '%s\n' "    Pacman" "$BACK" | pick "Remove")
+  case "${sel:-}" in
+    *Pacman*)    exec kitty -e sudo pacman -Rns ;;
+    *Kembali*)   main_menu ;;
+  esac
+}
+
+sub_update() {
+  sel=$(printf '%s\n' "    Semak kemas kini" "    Naik taraf" "$BACK" | pick "Update")
+  case "${sel:-}" in
+    *Semak*)      exec kitty -e pacman -Qu ;;
+    *Naik*)       exec kitty -e sudo pacman -Syu ;;
+    *Kembali*)    main_menu ;;
+  esac
+}
+
+about() {
+  notify-send "KimRity" "Arch + Hyprland · workstation keselamatan
+Kernel: $(uname -r)
+Gate: /usr/local/bin/kimrity-gate" 2>/dev/null || true
+}
+
+# ------------------------------------------------------------------ akar
+main_menu() {
+  sel=$(printf '%s\n' \
+    "    Apps" \
+    "    Learn" \
+    "    Trigger" \
+    "    Style" \
+    "    Setup" \
+    "    Install" \
+    "    Remove" \
+    "    Update" \
+    "    About" \
+    "    System" | pick "Go…")
+
+  case "${sel:-}" in
+    *Apps*)     exec wofi --show drun --style "$HOME/.config/wofi/style.css" ;;
+    *Learn*)    sub_learn ;;
+    *Trigger*)  sub_trigger ;;
+    *Style*)    sub_style ;;
+    *Setup*)    sub_setup ;;
+    *Install*)  sub_install ;;
+    *Remove*)   sub_remove ;;
+    *Update*)   sub_update ;;
+    *About*)    about ;;
+    *System*)   exec "$HOME/.local/bin/powermenu" ;;
+  esac
+}
+
+main_menu

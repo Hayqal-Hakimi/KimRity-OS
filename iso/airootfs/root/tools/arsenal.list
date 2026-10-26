@@ -1,0 +1,40 @@
+# Arsenal KimRity — pakej teras (dipasang install.sh, lalai)
+# Gate KimRity perlukan: gitleaks, semgrep, trivy, nmap, nuclei, nikto, ssh-audit.
+# Pakej berat/experimen AI ada dalam arsenal-ai.list (opsyenal: --ai).
+
+## Recon & web
+amass
+masscan
+nuclei
+ffuf
+sqlmap
+theharvester
+nikto
+
+## Exploitation & credentials
+metasploit
+burpsuite
+hydra
+hashcat
+
+## Rangkaian & reverse engineering
+wireshark-qt
+bettercap
+ghidra
+radare2
+angr
+
+## Forensik & pertahanan
+volatility3
+autopsy
+zeek
+suricata
+
+## AI security (ringan)
+aimap
+
+## Sokongan Security Gate
+gitleaks
+trivy
+semgrep
+ssh-audit

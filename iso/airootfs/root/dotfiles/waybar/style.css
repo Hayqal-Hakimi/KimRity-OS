@@ -1,0 +1,27 @@
+/* ~/.config/waybar/style.css — minimal (arch-uji) */
+* {
+  font-family: "JetBrainsMono Nerd Font";
+  font-size: 12px;
+  border: none;
+  border-radius: 0;
+  min-height: 0;
+}
+
+window#waybar {
+  background: rgba(30, 30, 46, 0.85);
+  color: #cdd6f4;
+}
+
+#clock, #cpu, #memory, #network, #workspaces button {
+  padding: 0 10px;
+  color: #cdd6f4;
+}
+
+#workspaces button.active {
+  background: #89b4fa;
+  color: #1e1e2e;
+}
+
+#workspaces button:hover {
+  background: rgba(137, 180, 250, 0.3);
+}

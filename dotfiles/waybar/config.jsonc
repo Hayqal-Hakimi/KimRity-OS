@@ -1,0 +1,43 @@
+// ~/.config/waybar/config.jsonc — minimal (arch-uji)
+{
+  "layer": "top",
+  "position": "top",
+  "height": 28,
+  "spacing": 6,
+  "modules-left": ["hyprland/workspaces"],
+  "modules-center": ["clock"],
+  "modules-right": ["tray", "wireplumber", "cpu", "memory", "network"],
+
+  "hyprland/workspaces": {
+    "format": "{name}",
+    "on-click": "activate"
+  },
+  "clock": {
+    "format": "{:%H:%M  %a %d %b}",
+    "tooltip": false
+  },
+  "cpu": {
+    "format": "CPU {usage}%",
+    "interval": 3
+  },
+  "memory": {
+    "format": "RAM {percentage}%",
+    "interval": 5
+  },
+  "network": {
+    "format-wifi": "wifi",
+    "format-ethernet": "lan",
+    "format-disconnected": "off",
+    "tooltip": false
+  },
+  "wireplumber": {
+    "format": "vol {volume}%",
+    "format-muted": "vol senyap",
+    "on-click": "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle",
+    "tooltip": false
+  },
+  "tray": {
+    "icon-size": 14,
+    "spacing": 8
+  }
+}

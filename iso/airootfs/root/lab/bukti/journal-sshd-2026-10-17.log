@@ -1,0 +1,38 @@
+2026-10-17T09:42:30+08:00 arch-uji sshd-session[520]: Connection closed by authenticating user root 10.0.2.2 port 51640 [preauth]
+2026-10-17T09:44:00+08:00 arch-uji sshd-session[544]: Accepted publickey for hayqal from 10.0.2.2 port 49802 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:44:00+08:00 arch-uji sshd-session[544]: pam_unix(sshd:session): session opened for user hayqal(uid=1000) by hayqal(uid=0)
+2026-10-17T09:44:00+08:00 arch-uji sshd-session[544]: pam_unix(sshd:session): session closed for user hayqal
+2026-10-17T09:44:35+08:00 arch-uji sshd-session[566]: Accepted publickey for root from 10.0.2.2 port 50386 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:44:35+08:00 arch-uji sshd-session[566]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)
+2026-10-17T09:44:35+08:00 arch-uji sshd-session[566]: pam_unix(sshd:session): session closed for user root
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[574]: Accepted publickey for hayqal from 10.0.2.2 port 49972 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[574]: pam_unix(sshd:session): session opened for user hayqal(uid=1000) by hayqal(uid=0)
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[574]: pam_unix(sshd:session): session closed for user hayqal
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[581]: Invalid user admin from 10.0.2.2 port 49986
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[581]: Connection closed by invalid user admin 10.0.2.2 port 49986 [preauth]
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[583]: Invalid user root_test from 10.0.2.2 port 49994
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[583]: Connection closed by invalid user root_test 10.0.2.2 port 49994 [preauth]
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[585]: Invalid user oracle from 10.0.2.2 port 49998
+2026-10-17T09:44:51+08:00 arch-uji sshd-session[585]: Connection closed by invalid user oracle 10.0.2.2 port 49998 [preauth]
+2026-10-17T09:44:52+08:00 arch-uji sshd-session[587]: Invalid user ftpuser from 10.0.2.2 port 50000
+2026-10-17T09:44:52+08:00 arch-uji sshd-session[587]: Connection closed by invalid user ftpuser 10.0.2.2 port 50000 [preauth]
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: srclimit_penalise: 10.0.2.2/32: activating ipv4 penalty of 19.644 seconds for penalty: attempted authentication by invalid user
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:50014 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:50030 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:50036 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:50050 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:50060 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:44:52+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:50066 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:45:02+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:42410 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:45:02+08:00 arch-uji sshd[328]: drop connection #0 from [10.0.2.2]:42418 on [10.0.2.15]:22 penalty: attempted authentication by invalid user
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[603]: Accepted publickey for root from 10.0.2.2 port 56540 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[603]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[603]: pam_unix(sshd:session): session closed for user root
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[611]: Accepted publickey for root from 10.0.2.2 port 56554 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[611]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[611]: pam_unix(sshd:session): session closed for user root
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[622]: Accepted publickey for root from 10.0.2.2 port 56556 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[622]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)
+2026-10-17T09:46:23+08:00 arch-uji sshd-session[622]: pam_unix(sshd:session): session closed for user root
+2026-10-17T09:48:39+08:00 arch-uji sshd-session[632]: Accepted publickey for root from 10.0.2.2 port 60788 ssh2: ED25519 SHA256:V+LYANWddJJ1ugm1fBJliVevcRRXV5E36KquUzkIlEg
+2026-10-17T09:48:39+08:00 arch-uji sshd-session[632]: pam_unix(sshd:session): session opened for user root(uid=0) by root(uid=0)

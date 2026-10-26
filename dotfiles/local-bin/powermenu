@@ -1,0 +1,10 @@
+#!/bin/sh
+# Menu kuasa melalui wofi.
+set -u
+choice="$(printf 'kunci\nlog keluar\nbut semula\nmatikan' | wofi --dmenu -p 'kuasa')" || exit 0
+case "$choice" in
+  kunci)      exec hyprlock ;;
+  'log keluar') exec hyprctl dispatch exit ;;
+  'but semula') exec systemctl reboot ;;
+  matikan)    exec systemctl poweroff ;;
+esac

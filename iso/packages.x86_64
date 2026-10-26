@@ -1,0 +1,29 @@
+## KimRity — pakej dalam ISO (live + pemasang)
+## Desktop/tool dipasang oleh install.sh dari mirror, bukan dibawa dalam squashfs.
+
+base
+linux
+linux-firmware
+btrfs-progs
+dosfstools
+gptfdisk
+limine
+efibootmgr
+networkmanager
+sudo
+neovim
+openssh
+arch-install-scripts
+mkinitcpio-archiso
+pacman
+nano
+less
+which
+iputils
+inetutils
+memtest86+-efi
+tcpdump
+nmap
+yara
+audit
+clamav

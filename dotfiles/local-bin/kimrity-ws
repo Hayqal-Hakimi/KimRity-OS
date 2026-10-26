@@ -1,0 +1,111 @@
+#!/bin/sh
+# kimrity-ws — ubah preset workspace. Semua arahan cetak fail penuh ke stdout.
+# Format baris: preset|label|ws|tool|arahan
+#   list    <preset>
+#   set     <preset> <baris> <ws>          tukar tab satu baris
+#   settool <preset> <baris> <tool>        tukar tool (binari)
+#   setargs <preset> <baris> <arahan>      tukar arahan / link
+#   add     <preset> <ws> <tool> [arahan]
+#   del     <preset> <baris>
+#   all     <preset> <ws>                  semua app preset ke satu tab
+set -u
+
+conf="${KIMRITY_WORKSPACES:-$HOME/.config/kimrity/workspaces.conf}"
+cmd="${1:?arahan: list|set|settool|setargs|add|del|all}"
+preset="${2:?preset: F1|F2|F3}"
+
+[ -r "$conf" ] || { echo "tiada fail: $conf" >&2; exit 1; }
+
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp"' EXIT
+
+semak_ws() {
+    case "$1" in
+        [1-9]) ;;
+        *) echo "ws mesti 1..9" >&2; exit 2 ;;
+    esac
+}
+
+# pecah baris -> p|l|w|tool|arahan (baris lama 4 medan dinormalkan)
+pecah() {
+    p=${1%%|*}
+    rest=${1#*|}
+    l=${rest%%|*}
+    rest=${rest#*|}
+    w=${rest%%|*}
+    rest=${rest#*|}
+    tool=${rest%%|*}
+    args=${rest#*|}
+    if [ "$args" = "$rest" ]; then
+        args=""
+        temp=$tool
+        tool=${temp%% *}
+        [ "$temp" != "$tool" ] && args=${temp#* }
+    fi
+}
+
+tulis() {
+    printf '%s|%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" "$5" >> "$tmp"
+}
+
+case "$cmd" in
+    list) : ;;
+
+    set|settool|setargs|del)
+        baris="${3:?baris}"
+        case "$baris" in ''|*[!0-9]*) echo "baris mesti nombor" >&2; exit 2 ;; esac
+        nilai="${4:-}"
+        [ "$cmd" = set ] && semak_ws "$nilai"
+        n=0
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*) printf '%s\n' "$line" >> "$tmp"; continue ;;
+            esac
+            pecah "$line"
+            if [ "$p" = "$preset" ]; then
+                n=$((n + 1))
+                if [ "$n" -eq "$baris" ]; then
+                    case "$cmd" in
+                        set)     w=$nilai ;;
+                        settool) tool=$nilai ;;
+                        setargs) args=$nilai ;;
+                        del)     continue ;;
+                    esac
+                fi
+            fi
+            tulis "$p" "$l" "$w" "$tool" "$args"
+        done < "$conf"
+        mv "$tmp" "$conf"
+        ;;
+
+    add)
+        ws="${3:?ws}"
+        tool="${4:?tool}"
+        args="${5:-}"
+        semak_ws "$ws"
+        label=$(grep "^${preset}|" "$conf" | head -1 | cut -d'|' -f2)
+        printf '%s|%s|%s|%s|%s\n' "$preset" "${label:-$preset}" "$ws" "$tool" "$args" >> "$conf"
+        ;;
+
+    all)
+        ws="${3:?ws}"
+        semak_ws "$ws"
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*) printf '%s\n' "$line" >> "$tmp"; continue ;;
+            esac
+            pecah "$line"
+            [ "$p" = "$preset" ] && w=$ws
+            tulis "$p" "$l" "$w" "$tool" "$args"
+        done < "$conf"
+        mv "$tmp" "$conf"
+        ;;
+
+    *)
+        echo "arahan tidak dikenali: $cmd" >&2
+        exit 1
+        ;;
+esac
+
+# sentiasa pulangkan keadaan terkini supaya UI tidak bergantung pada cache
+cat "$conf"

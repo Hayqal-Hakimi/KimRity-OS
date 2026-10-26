@@ -1,0 +1,20 @@
+## Identiti, kebenaran & kunci SSH — auditd
+## Dipasang ke /etc/audit/rules.d/10-identity.rules
+## Uji: auditctl -l  ·  ausearch -k identity
+
+-w /etc/passwd            -p wa -k identity
+-w /etc/shadow            -p wa -k identity
+-w /etc/group             -p wa -k identity
+-w /etc/gshadow           -p wa -k identity
+
+-w /etc/sudoers           -p wa -k privilege
+-w /etc/sudoers.d/        -p wa -k privilege
+
+-w /root/.ssh/            -p wa -k ssh_keys
+-w /home/hayqal/.ssh/     -p wa -k ssh_keys
+-w /etc/ssh/sshd_config   -p wa -k ssh_config
+-w /etc/ssh/sshd_config.d/ -p wa -k ssh_config
+
+## setuid/setgid oleh user biasa (bukan root) — penunjuk eskalasi
+-a always,exit -F arch=b64 -S setuid -S setgid -F auid>=1000 -F auid!=-1 -k privilege_escalation
+-a always,exit -F arch=b32 -S setuid -S setgid -F auid>=1000 -F auid!=-1 -k privilege_escalation

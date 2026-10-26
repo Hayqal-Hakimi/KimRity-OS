@@ -1,0 +1,19 @@
+#!/bin/sh
+# Screenshot: full (lalai) atau region. Simpan + salin ke clipboard.
+set -u
+dir="$HOME/Pictures"
+mkdir -p "$dir"
+f="$dir/$(date +%Y%m%d-%H%M%S).png"
+
+case "${1:-full}" in
+  region)
+    geo="$(slurp)" || exit 1
+    grim -g "$geo" "$f" || exit 1
+    ;;
+  *)
+    grim "$f" || exit 1
+    ;;
+esac
+
+wl-copy < "$f" 2>/dev/null || true
+notify-send "Screenshot" "$f" 2>/dev/null || true

@@ -1,0 +1,34 @@
+title: SSH Brute Force - Banyak Log Masuk Gagal dari Satu Sumber
+id: 9e18bab4-fa4b-4f42-8f8a-b2a2d9d90841
+status: experimental
+description: |
+  Mendeteksi cubaan log masuk SSH berulang yang gagal (pengguna tidak sah atau
+  kelayakan salah) daripada satu alamat sumber dalam tempoh singkat. Corak ini
+  menandakan brute-force atau password spraying terhadap perkhidmatan SSH.
+references:
+  - https://attack.mitre.org/techniques/T1110/001/
+author: Hayqal (makmal arch-uji)
+date: 2026-10-17
+tags:
+  - attack.credential_access
+  - attack.t1110.001
+logsource:
+  product: linux
+  service: sshd
+detection:
+  selection:
+    keywords:
+      - 'Invalid user'
+      - 'Failed password'
+      - 'Failed publickey'
+      - 'Connection closed by authenticating user'
+  timeframe: 5m
+  condition: selection | count() by src_ip > 5
+fields:
+  - src_ip
+  - user
+falsepositives:
+  - Pengimbas kerentanan atau pentest sah dalam skop
+  - Skrip backup/monitor dengan kelayakan basi
+  - Pengguna tersalah taip berulang (jarang melebihi 5 kali dalam 5 minit)
+level: medium

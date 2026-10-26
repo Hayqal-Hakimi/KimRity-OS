@@ -1,0 +1,20 @@
+#!/bin/sh
+# kimrity-tools — senarai tool yang benar-benar ada (PATH + ~/.local/bin), cache 1 hari.
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/kimrity/tools.txt"
+
+jarak=999999
+[ -s "$cache" ] && jarak=$(( $(date +%s) - $(stat -c %Y "$cache") ))
+
+if [ "$jarak" -gt 86400 ]; then
+    mkdir -p "$(dirname "$cache")"
+    {
+        printf '%s\n' "$PATH" | tr ':' '\n'
+        printf '%s\n' "$HOME/.local/bin"
+    } | while IFS= read -r d; do
+        [ -n "$d" ] && [ -d "$d" ] || continue
+        find "$d" -maxdepth 1 -type f -perm -u+x -printf '%f\n' 2>/dev/null
+    done | grep -vE '\.(sh|py|conf|txt|desktop|bak|old)$' | sort -u > "$cache.tmp" \
+        && mv "$cache.tmp" "$cache"
+fi
+
+cat "$cache"

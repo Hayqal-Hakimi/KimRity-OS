@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ms">
+<head>
+<meta charset="utf-8">
+<title>KimRity — menu (mockup)</title>
+<style>
+  html, body { margin: 0; background: transparent; }
+  body {
+    font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+    color: #cdd6f4;
+    padding: 18px 22px 22px 18px;
+    width: 760px;
+  }
+  .stage {
+    position: relative;
+    border-radius: 16px;
+    padding: 46px 0;
+    background:
+      radial-gradient(120% 90% at 78% 18%, #6d5ae6 0%, #3b2f7a 42%, #191a2e 100%),
+      #191a2e;
+    overflow: hidden;
+  }
+  .stage::after {
+    content: "";
+    position: absolute;
+    inset: -30% -10% auto auto;
+    width: 420px; height: 420px;
+    background: radial-gradient(circle, rgba(190,120,255,.55), transparent 70%);
+    filter: blur(30px);
+  }
+  .panel {
+    position: relative;
+    width: 460px;
+    margin: 0 auto;
+    background: rgba(24, 24, 37, .93);
+    border: 1px solid rgba(137,180,250,.35);
+    border-radius: 14px;
+    padding: 12px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.45);
+  }
+  .search {
+    display: flex; align-items: center; gap: 10px;
+    background: rgba(49,50,68,.85);
+    border-radius: 10px;
+    padding: 11px 14px;
+    color: #7f849c;
+    margin-bottom: 8px;
+  }
+  .row {
+    display: flex; align-items: center; gap: 14px;
+    padding: 11px 12px;
+    border-radius: 9px;
+    font-size: 15px;
+  }
+  .row.sel { background: rgba(137,180,250,.16); color: #89b4fa; }
+  .ico { width: 20px; text-align: center; opacity: .95; }
+  .lbl { flex: 1; }
+  .chev { color: #6c7086; font-size: 14px; }
+  .row.sel .chev { color: #89b4fa; }
+  .cap { color: #6c7086; font-size: 12px; margin: 6px 0 0 4px; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="panel">
+      <div class="search"><span>⌕</span><span>Go…</span></div>
+
+      <div class="row sel"><span class="ico">▦</span><span class="lbl">Apps</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">✦</span><span class="lbl">Learn</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">⌁</span><span class="lbl">Trigger</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">✎</span><span class="lbl">Style</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">⚙</span><span class="lbl">Setup</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">⤓</span><span class="lbl">Install</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">␡</span><span class="lbl">Remove</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">↻</span><span class="lbl">Update</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">ⓘ</span><span class="lbl">About</span><span class="chev">›</span></div>
+      <div class="row"><span class="ico">⏻</span><span class="lbl">System</span><span class="chev">›</span></div>
+    </div>
+    <div class="cap" style="text-align:center">mockup — wofi dmenu + CSS · 460×560 · JetBrains Mono</div>
+  </div>
+</body>
+</html>
