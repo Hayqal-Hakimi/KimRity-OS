@@ -404,7 +404,7 @@ def write_report(session: dict, path: str) -> None:
 # --------------------------------------------------------------- imbasan
 
 def json_emit(obj: dict) -> None:
-    print(json.dumps(obj, ensure_ascii=False), flush=True)
+    print(json.dumps(obj, ensure_ascii=False, separators=(",", ":")), flush=True)
 
 
 def fail(message: str) -> int:

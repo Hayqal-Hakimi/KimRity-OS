@@ -1,0 +1,1370 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""KimLogPipe v1 - normalisasi log system + pengesanan berasaskan ambang.
+
+Tiada AI, tiada model, tiada rangkaian. Semua data kekal dalam
+$XDG_DATA_HOME/kimlogpipe/ (fallback ~/.local/share/kimlogpipe/).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+APP = "kimlogpipe"
+VERSION = "1.0"
+SCRIPT_DIR = Path(__file__).resolve().parent
+RULES_PATH = SCRIPT_DIR / "rules.yaml"
+AUDIT_LOG = os.environ.get("KIMLOGPIPE_AUDIT_LOG", "/var/log/audit/audit.log")
+JOURNAL_LINES = int(os.environ.get("KIMLOGPIPE_JOURNAL_LINES", "2000"))
+
+PLACEHOLDERS = {
+    "",
+    "?",
+    "(null)",
+    "null",
+    "none",
+    "(none)",
+    "unset",
+    "unknown",
+    "4294967295",
+}
+
+# ---------------------------------------------------------------------------
+# Utiliti umum
+# ---------------------------------------------------------------------------
+
+
+def data_dir() -> Path:
+    """Direktori storan. XDG_DATA_HOME diutamakan, kemudian ~/.local/share."""
+    xdg = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    d = base / APP
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def iso_ts(epoch: float) -> str:
+    """Epoch -> ISO8601 UTC dengan mikrosaat (contoh 2026-10-26T10:01:59.317763Z)."""
+    dt = datetime.fromtimestamp(epoch, timezone.utc)
+    return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def epoch_of(ts: str) -> float:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
+def now_iso() -> str:
+    return iso_ts(datetime.now(timezone.utc).timestamp())
+
+
+def log(msg: str) -> None:
+    print(msg)
+
+
+def die(msg: str, code: int = 1) -> "NoReturn":
+    print(f"RALAT: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# ---------------------------------------------------------------------------
+# Parser YAML mini (fallback jika PyYAML tiada). Hanya menyokong subset
+# yang digunakan oleh rules.yaml: peta, senarai, skalar, senarai inline.
+# ---------------------------------------------------------------------------
+
+
+def _strip_comment(line: str) -> str:
+    out = []
+    quote = None
+    for ch in line:
+        if quote:
+            out.append(ch)
+            if ch == quote:
+                quote = None
+        else:
+            if ch in ("'", '"'):
+                quote = ch
+                out.append(ch)
+            elif ch == "#":
+                break
+            else:
+                out.append(ch)
+    return "".join(out).rstrip()
+
+
+def _split_inline(text: str):
+    parts, buf, quote = [], [], None
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif ch == ",":
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
+def _scalar(text: str):
+    s = text.strip()
+    if not s:
+        return None
+    if s.startswith("[") and s.endswith("]"):
+        inner = s[1:-1].strip()
+        return [] if not inner else [_scalar(x) for x in _split_inline(inner)]
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+        return s[1:-1]
+    low = s.lower()
+    if low in ("true", "yes"):
+        return True
+    if low in ("false", "no"):
+        return False
+    if low in ("null", "~"):
+        return None
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
+
+
+_KV_LINE = re.compile(r"^[A-Za-z_][\w-]*\s*:")
+
+
+def _parse_block(lines, i, indent):
+    if i >= len(lines):
+        return None, i
+    if lines[i][1].startswith("- "):
+        arr = []
+        while i < len(lines) and lines[i][0] == indent and lines[i][1].startswith("- "):
+            content = lines[i][1][2:].strip()
+            if not content:
+                i += 1
+                if i < len(lines) and lines[i][0] > indent:
+                    val, i = _parse_block(lines, i, lines[i][0])
+                else:
+                    val = None
+                arr.append(val)
+            elif _KV_LINE.match(content):
+                key, _, rest = content.partition(":")
+                item = {}
+                key, rest = key.strip(), rest.strip()
+                i += 1
+                if rest:
+                    item[key] = _scalar(rest)
+                elif i < len(lines) and lines[i][0] > indent:
+                    val, i = _parse_block(lines, i, lines[i][0])
+                    item[key] = val
+                else:
+                    item[key] = None
+                while (
+                    i < len(lines)
+                    and lines[i][0] > indent
+                    and not lines[i][1].startswith("- ")
+                ):
+                    k, _, r = lines[i][1].partition(":")
+                    k, r = k.strip(), r.strip()
+                    i += 1
+                    if r:
+                        item[k] = _scalar(r)
+                    elif i < len(lines) and lines[i][0] > indent:
+                        val, i = _parse_block(lines, i, lines[i][0])
+                        item[k] = val
+                    else:
+                        item[k] = None
+                arr.append(item)
+            else:
+                arr.append(_scalar(content))
+                i += 1
+        return arr, i
+
+    obj = {}
+    while i < len(lines) and lines[i][0] == indent:
+        content = lines[i][1]
+        if content.startswith("- "):
+            break
+        k, sep, r = content.partition(":")
+        if not sep:
+            i += 1
+            continue
+        k, r = k.strip(), r.strip()
+        i += 1
+        if r:
+            obj[k] = _scalar(r)
+        elif i < len(lines) and lines[i][0] > indent:
+            val, i = _parse_block(lines, i, lines[i][0])
+            obj[k] = val
+        else:
+            obj[k] = None
+    return obj, i
+
+
+def mini_yaml_load(text: str):
+    lines = []
+    for raw in text.splitlines():
+        stripped = _strip_comment(raw)
+        if not stripped.strip() or stripped.strip() in ("---", "..."):
+            continue
+        indent = len(stripped) - len(stripped.lstrip(" "))
+        lines.append((indent, stripped.strip()))
+    if not lines:
+        return None
+    value, _ = _parse_block(lines, 0, lines[0][0])
+    return value
+
+
+def load_rules() -> dict:
+    if not RULES_PATH.is_file():
+        die(f"fail peraturan tidak dijumpai: {RULES_PATH}")
+    text = RULES_PATH.read_text(encoding="utf-8")
+    force_mini = os.environ.get("KIMLOGPIPE_FORCE_MINI_YAML") == "1"
+    data = None
+    if not force_mini:
+        try:
+            import yaml  # type: ignore
+
+            data = yaml.safe_load(text)
+        except Exception:
+            data = None
+    if data is None:
+        try:
+            data = mini_yaml_load(text)
+        except Exception as exc:  # pragma: no cover - fail-fast
+            die(f"gagal menghurai rules.yaml: {exc}")
+    if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
+        die("rules.yaml tidak sah: kunci 'rules' (senarai) diperlukan")
+    names = set()
+    for r in data["rules"]:
+        if not isinstance(r, dict):
+            die("rules.yaml tidak sah: setiap peraturan mesti peta")
+        for key in ("name", "type", "severity"):
+            if not r.get(key):
+                die(f"rules.yaml tidak sah: peraturan tiada '{key}'")
+        if r["name"] in names:
+            die(f"rules.yaml tidak sah: nama peraturan berganda '{r['name']}'")
+        names.add(r["name"])
+    return data
+
+
+# ---------------------------------------------------------------------------
+# Parser journald
+# ---------------------------------------------------------------------------
+
+J_SSH_FAIL = (
+    "failed password",
+    "failed publickey",
+    "authentication failure",
+    "too many authentication failures",
+    "error: pam: authentication failure",
+)
+
+
+def _first(patterns, text):
+    for pat in patterns:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def journald_user(msg: str) -> str:
+    user = _first(
+        [
+            r"\bacct=\"?([^\s\",;]+)",
+            r"\buser=([^\s,;]+)",
+            r"\bfor (?:invalid )?user ([^\s(,;]+)",
+            r"\bfor ([^\s(,;]+) from",
+            r"\bInvalid user ([^\s,;]+)",
+        ],
+        msg,
+    )
+    return "" if user.lower() in PLACEHOLDERS else user
+
+
+def _prefix_user(msg: str) -> str:
+    """Pengguna daripada format 'sudo: root : ...' / 'root : ...'."""
+    m = re.match(r"^(?:sudo|su)(?:\[\d+\])?:\s+([A-Za-z0-9_.@-]+)\s*:", msg)
+    if m:
+        return m.group(1)
+    m = re.match(r"^\s*([A-Za-z0-9_.@-]+)\s*:", msg)
+    if m and m.group(1).lower() not in ("sudo", "su", "aide", "pam_unix"):
+        return m.group(1)
+    return ""
+
+
+def journald_ip(msg: str) -> str:
+    ip = _first(
+        [
+            r"\bfrom ([0-9A-Fa-f:.]+) port \d+",
+            r"\bby ([0-9A-Fa-f:.]+) port \d+",
+            r"\brhost=([^\s;]+)",
+            r"\baddr=([^\s;'\"]+)",
+        ],
+        msg,
+    )
+    return "" if ip.lower() in PLACEHOLDERS else ip
+
+
+def classify_journald(rec: dict):
+    """Pulangkan (action, outcome, user, src_ip) daripada satu rekod journald."""
+    msg = str(rec.get("MESSAGE", "") or "")
+    ident = str(rec.get("SYSLOG_IDENTIFIER", "") or "")
+    comm = str(rec.get("_COMM", "") or "")
+    low = msg.lower()
+    ident_l = ident.lower()
+    comm_l = comm.lower()
+    user = journald_user(msg)
+    ip = journald_ip(msg)
+    sshish = ident_l.startswith("sshd") or comm_l.startswith("sshd") or "sshd" in low
+
+    if sshish:
+        if "accepted " in low:
+            return "ssh_login", "success", user, ip
+        if "invalid user" in low:
+            return "ssh_invalid_user", "failed", user, ip
+        if any(k in low for k in J_SSH_FAIL):
+            return "ssh_auth_failed", "failed", user, ip
+        # PerSourcePenalties memotong log: isyarat kegagalan boleh muncul
+        # sebagai "drop connection" atau "Connection closed ... [preauth]".
+        if "drop connection" in low or ("closed by" in low and "[preauth]" in low):
+            return "ssh_drop", "failed", user, ip
+        if "session opened" in low:
+            return "ssh_session_open", "success", user, ip
+        if "session closed" in low:
+            return "ssh_session_close", "success", user, ip
+        if (
+            "server listening" in low
+            or "starting openssh" in low
+            or "started openssh" in low
+        ):
+            return "ssh_service", "success", user, ip
+
+    sudoish = (
+        ident_l == "sudo"
+        or comm_l == "sudo"
+        or "pam_unix(sudo:" in low
+        or low.startswith("sudo:")
+        or low.startswith("sudo[")
+    )
+    if sudoish:
+        if not user:
+            user = _prefix_user(msg)
+        if any(
+            k in low
+            for k in (
+                "authentication failure",
+                "incorrect password",
+                "not in sudoers",
+                "failed",
+                "error",
+            )
+        ):
+            return "sudo_fail", "failed", user, ip
+        return "sudo", "success" if "command=" in low else "unknown", user, ip
+
+    suish = (
+        ident_l == "su"
+        or comm_l == "su"
+        or "pam_unix(su:" in low
+        or "failed su" in low
+        or low.startswith("su:")
+    )
+    if suish:
+        if not user:
+            user = _prefix_user(msg)
+        if any(
+            k in low
+            for k in ("authentication failure", "failed", "incorrect password")
+        ):
+            return "su_fail", "failed", user, ip
+        return "su", "unknown", user, ip
+
+    if "aide" in low and any(
+        k in low
+        for k in (
+            "added",
+            "removed",
+            "changed",
+            "differences",
+            "file changes",
+            "changed files",
+        )
+    ):
+        return "aide_change", "unknown", user, ip
+
+    if "authentication failure" in low:
+        return "auth_failed", "failed", user, ip
+    return "log", "unknown", user, ip
+
+
+def journald_ts(rec: dict):
+    raw = rec.get("__REALTIME_TIMESTAMP") or rec.get("_SOURCE_REALTIME_TIMESTAMP")
+    if raw is None:
+        return None
+    try:
+        return int(raw) / 1_000_000.0
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_journald_line(rec: dict, raw_ref: str):
+    """Rekod journald -> event seragam, atau (None, sebab)."""
+    if not isinstance(rec, dict):
+        return None, "JSON bukan objek"
+    epoch = journald_ts(rec)
+    if epoch is None:
+        return None, "medan __REALTIME_TIMESTAMP tiada/tidak sah"
+    action, outcome, user, ip = classify_journald(rec)
+    event = {
+        "ts": iso_ts(epoch),
+        "source": "journald",
+        "host": str(rec.get("_HOSTNAME", "") or ""),
+        "user": user,
+        "src_ip": ip,
+        "action": action,
+        "outcome": outcome,
+        "raw_ref": raw_ref,
+    }
+    return event, None
+
+
+# ---------------------------------------------------------------------------
+# Parser auditd
+# ---------------------------------------------------------------------------
+
+AUDIT_HDR = re.compile(
+    r"^(?:node=(\S+)\s+)?type=([A-Z0-9_]+)\s+msg=audit\((\d+(?:\.\d+)?):(\d+)\):\s*(.*)$"
+)
+AUDIT_KV = re.compile(
+    r"([A-Za-z_][\w-]*)=(\"(?:[^\"\\]|\\.)*\"|'[^']*'|\S+)"
+)
+AUDIT_INNER_TYPES = {
+    "USER_AUTH",
+    "USER_ACCT",
+    "USER_LOGIN",
+    "USER_START",
+    "USER_END",
+    "USER_CMD",
+    "CRED_ACQ",
+    "CRED_DISP",
+    "SERVICE_START",
+    "SERVICE_STOP",
+}
+SYSCALL_NAMES = {"59": "execve", "322": "execveat"}  # x86_64
+AUDIT_PRIORITY = [
+    "USER_AUTH",
+    "USER_ACCT",
+    "USER_LOGIN",
+    "USER_START",
+    "USER_END",
+    "USER_CMD",
+    "SERVICE_START",
+    "SERVICE_STOP",
+    "CRED_ACQ",
+    "CRED_DISP",
+    "SYSCALL",
+    "EXECVE",
+    "BPF",
+    "PROCTITLE",
+]
+
+
+def parse_kv(text: str) -> dict:
+    out = {}
+    for m in AUDIT_KV.finditer(text):
+        val = m.group(2)
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        out[m.group(1)] = val
+    return out
+
+
+def audit_epoch(sec: str) -> float:
+    if "." in sec:
+        whole, frac = sec.split(".", 1)
+        return int(whole) + (int(frac) / (10 ** len(frac)))
+    return float(sec)
+
+
+def parse_audit_line(line: str):
+    m = AUDIT_HDR.match(line)
+    if not m:
+        return None
+    node, rtype, sec, serial, rest = m.groups()
+    fields = parse_kv(rest)
+    if node:
+        fields.setdefault("node", node)
+    inner = {}
+    if rtype in AUDIT_INNER_TYPES and "msg" in fields:
+        inner = parse_kv(fields["msg"])
+    return {
+        "type": rtype,
+        "ts": audit_epoch(sec),
+        "serial": serial,
+        "fields": fields,
+        "inner": inner,
+        "line": line,
+    }
+
+
+def audit_user(recs) -> str:
+    inner = {}
+    for r in recs:
+        inner.update(r["inner"])
+    acct = inner.get("acct", "")
+    if acct and acct.lower() not in PLACEHOLDERS:
+        return acct
+    for r in recs:
+        for key in ("AUID", "UID"):
+            val = r["fields"].get(key, "")
+            if val and val.lower() not in PLACEHOLDERS:
+                return val
+    for r in recs:
+        for key in ("auid", "uid"):
+            val = r["fields"].get(key, "")
+            if val and val.lower() not in PLACEHOLDERS:
+                return val
+    return ""
+
+
+def audit_ip(recs) -> str:
+    for r in recs:
+        for key in ("addr", "hostname"):
+            val = r["inner"].get(key, "")
+            if val and val.lower() not in PLACEHOLDERS:
+                return val
+    return ""
+
+
+def audit_outcome(recs) -> str:
+    for r in recs:
+        for key in ("res", "result", "success"):
+            val = (r["inner"].get(key) or r["fields"].get(key) or "").lower()
+            if val in ("success", "yes", "1"):
+                return "success"
+            if val in ("failed", "no", "0"):
+                return "failed"
+    return "unknown"
+
+
+def build_audit_event(recs, raw_ref: str):
+    primary = None
+    for rtype in AUDIT_PRIORITY:
+        for r in recs:
+            if r["type"] == rtype:
+                primary = r
+                break
+        if primary:
+            break
+    if primary is None:
+        primary = recs[0]
+    by_type = {}
+    for r in recs:
+        by_type.setdefault(r["type"], r)
+
+    outcome = audit_outcome(recs)
+    user = audit_user(recs)
+    ip = audit_ip(recs)
+
+    if "USER_AUTH" in by_type:
+        r = by_type["USER_AUTH"]
+        exe = r["inner"].get("exe") or r["fields"].get("exe", "")
+        base = os.path.basename(exe)
+        if base == "sudo":
+            action = "sudo_fail" if outcome == "failed" else "sudo"
+        elif base == "su":
+            action = "su_fail" if outcome == "failed" else "su"
+        else:
+            action = "user_auth"
+    elif "USER_CMD" in by_type:
+        r = by_type["USER_CMD"]
+        exe = r["inner"].get("exe") or r["fields"].get("exe", "")
+        action = "sudo_cmd" if os.path.basename(exe) == "sudo" else "user_cmd"
+    elif "SYSCALL" in by_type or "EXECVE" in by_type:
+        sc = by_type.get("SYSCALL")
+        name = ""
+        if sc:
+            name = str(sc["fields"].get("SYSCALL", "")).lower()
+            if not name:
+                name = SYSCALL_NAMES.get(str(sc["fields"].get("syscall", "")), "")
+        if name in ("execve", "execveat"):
+            exe = ""
+            if sc:
+                exe = sc["fields"].get("exe", "")
+            if not exe and "EXECVE" in by_type:
+                exe = by_type["EXECVE"]["fields"].get("a0", "")
+            base = os.path.basename(exe.strip("\"'")) or "tidak-diketahui"
+            action = f"execve:{base}"
+        else:
+            action = f"syscall:{name or 'tidak-diketahui'}"
+    else:
+        action = recs[0]["type"].lower()
+
+    return {
+        "ts": iso_ts(primary["ts"]),
+        "source": "auditd",
+        "host": next(
+            (
+                r["fields"].get("node", "")
+                for r in recs
+                if r["fields"].get("node", "").lower() not in PLACEHOLDERS
+            ),
+            "",
+        ),
+        "user": user,
+        "src_ip": ip,
+        "action": action,
+        "outcome": outcome,
+        "raw_ref": raw_ref,
+    }
+
+
+def parse_audit_file(path: Path):
+    events, raw_map, invalid, lines_read = [], {}, 0, 0
+    groups = {}  # serial -> senarai rekod (tertib kemunculan dikekalkan)
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        die(f"tidak dapat membaca {path}: {exc}")
+    with fh:
+        for lineno, raw in enumerate(fh, 1):
+            lines_read += 1
+            raw = raw.rstrip("\n")
+            if not raw.strip():
+                continue
+            rec = parse_audit_line(raw)
+            if rec is None:
+                invalid += 1
+                continue
+            rec["lineno"] = lineno
+            rec["raw"] = raw
+            groups.setdefault(rec["serial"], []).append(rec)
+    for serial, recs in groups.items():
+        primary = None
+        for rtype in AUDIT_PRIORITY:
+            for r in recs:
+                if r["type"] == rtype:
+                    primary = r
+                    break
+            if primary:
+                break
+        if primary is None:
+            primary = recs[0]
+        raw_ref = f"{path}:{primary['lineno']}"
+        event = build_audit_event(recs, raw_ref)
+        events.append(event)
+        raw_map[raw_ref] = primary["raw"]
+    return events, raw_map, invalid, lines_read
+
+
+# ---------------------------------------------------------------------------
+# Storan
+# ---------------------------------------------------------------------------
+
+
+def events_path() -> Path:
+    return data_dir() / "events.jsonl"
+
+
+def findings_path() -> Path:
+    return data_dir() / "findings.json"
+
+
+def raw_path() -> Path:
+    return data_dir() / "rawlines.jsonl"
+
+
+def load_events():
+    path = events_path()
+    if not path.is_file():
+        return []
+    out = []
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+    return out
+
+
+def load_raw_map() -> dict:
+    path = raw_path()
+    out = {}
+    if not path.is_file():
+        return out
+    with path.open("r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict) and "raw_ref" in obj:
+                out[obj["raw_ref"]] = obj.get("line", "")
+    return out
+
+
+def atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def store_events(new_events, new_raw) -> tuple[int, int]:
+    """Tambah peristiwa baharu, dedupe ikut ts+source+action+raw_ref."""
+    existing = load_events()
+    seen = {
+        (e.get("ts"), e.get("source"), e.get("action"), e.get("raw_ref"))
+        for e in existing
+    }
+    added = 0
+    for ev in new_events:
+        key = (ev["ts"], ev["source"], ev["action"], ev["raw_ref"])
+        if key in seen:
+            continue
+        seen.add(key)
+        existing.append(ev)
+        added += 1
+    dupes = len(new_events) - added
+    lines = "".join(
+        json.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n"
+        for e in existing
+    )
+    atomic_write(events_path(), lines)
+
+    raw_map = load_raw_map()
+    changed = False
+    for ref, line in new_raw.items():
+        if ref not in raw_map:
+            raw_map[ref] = line
+            changed = True
+    if changed:
+        raw_text = "".join(
+            json.dumps({"raw_ref": k, "line": v}, ensure_ascii=False) + "\n"
+            for k, v in raw_map.items()
+        )
+        atomic_write(raw_path(), raw_text)
+    return added, dupes
+
+
+# ---------------------------------------------------------------------------
+# Ingest
+# ---------------------------------------------------------------------------
+
+
+def ingest_journald_file(path: Path):
+    events, raw_map = [], {}
+    invalid = 0
+    lines_read = 0
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        die(f"tidak dapat membaca {path}: {exc}")
+    with fh:
+        for lineno, raw in enumerate(fh, 1):
+            lines_read += 1
+            raw = raw.rstrip("\n")
+            if not raw.strip():
+                continue
+            try:
+                rec = json.loads(raw)
+            except json.JSONDecodeError:
+                invalid += 1
+                continue
+            raw_ref = f"{path}:{lineno}"
+            event, reason = parse_journald_line(rec, raw_ref)
+            if event is None:
+                invalid += 1
+                continue
+            events.append(event)
+            raw_map[raw_ref] = raw
+    return events, raw_map, invalid, lines_read
+
+
+def ingest_journald_live():
+    cmd = ["journalctl", "-o", "json", "--no-pager", "-n", str(JOURNAL_LINES)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        die("journalctl tidak dijumpai (bukan sistem systemd?)")
+    except subprocess.TimeoutExpired:
+        die("journalctl tamat masa selepas 60s")
+    if proc.returncode != 0:
+        die(f"journalctl gagal: {proc.stderr.strip() or 'kod ' + str(proc.returncode)}")
+    events, raw_map = [], {}
+    invalid = 0
+    lines_read = 0
+    for raw in proc.stdout.splitlines():
+        lines_read += 1
+        try:
+            rec = json.loads(raw)
+        except json.JSONDecodeError:
+            invalid += 1
+            continue
+        cursor = str(rec.get("__CURSOR", "") or "")
+        if not cursor:
+            cursor = "journalctl:seq=" + str(rec.get("__SEQNUM", "?"))
+        event, reason = parse_journald_line(rec, cursor)
+        if event is None:
+            invalid += 1
+            continue
+        events.append(event)
+        raw_map[cursor] = raw
+    return events, raw_map, invalid, lines_read
+
+
+def ingest_audit_file(path: Path):
+    return parse_audit_file(path)
+
+
+def cmd_ingest(args):
+    if args.file:
+        path = Path(args.file).expanduser().resolve()
+        if not path.is_file():
+            die(f"fail tidak dijumpai: {path}")
+        if args.source == "journald":
+            events, raw_map, invalid, lines_read = ingest_journald_file(path)
+        else:
+            events, raw_map, invalid, lines_read = ingest_audit_file(path)
+        label = f"fail: {path}"
+    else:
+        if args.source == "journald":
+            events, raw_map, invalid, lines_read = ingest_journald_live()
+            label = f"live: journalctl -n {JOURNAL_LINES}"
+        else:
+            path = Path(AUDIT_LOG)
+            if not path.is_file():
+                die(f"fail audit langsung tidak dijumpai: {path}")
+            events, raw_map, invalid, lines_read = ingest_audit_file(path)
+            label = f"live: {path}"
+
+    added, dupes = store_events(events, raw_map)
+    total = len(load_events())
+    log(f"Sumber            : {args.source} ({label})")
+    log(f"Baris dibaca      : {lines_read}")
+    log(f"Peristiwa dihurai : {len(events)}")
+    log(f"Peristiwa baharu  : {added}")
+    log(f"Pendua dilangkau  : {dupes}")
+    log(f"Baris tidak sah   : {invalid}")
+    log(f"Jumlah dalam stor : {total}")
+    log(f"Stor              : {data_dir()}")
+
+
+# ---------------------------------------------------------------------------
+# Enjin peraturan
+# ---------------------------------------------------------------------------
+
+
+def evidence_for(events, raw_map):
+    out = []
+    for ev in events:
+        ref = ev.get("raw_ref", "")
+        line = raw_map.get(ref)
+        if line is None and ":" in ref:
+            # Fallback: baca semula fail sumber jika sidecar tiada.
+            fname, _, lineno = ref.rpartition(":")
+            try:
+                with open(fname, "r", encoding="utf-8", errors="replace") as fh:
+                    for i, raw in enumerate(fh, 1):
+                        if i == int(lineno):
+                            line = raw.rstrip("\n")
+                            break
+            except (OSError, ValueError):
+                line = None
+        if line is None:
+            line = ""
+        out.append({"raw_ref": ref, "line": line[:2000]})
+    return out
+
+
+def finding(rule, count, first_ts, last_ts, key, evidence, summary):
+    return {
+        "rule": rule["name"],
+        "severity": rule["severity"],
+        "count": count,
+        "first_ts": first_ts,
+        "last_ts": last_ts,
+        "key": key,
+        "evidence": evidence,
+        "summary_bm": summary,
+    }
+
+
+def eval_threshold(rule, events, raw_map):
+    signals = set(rule.get("signals") or [])
+    try:
+        threshold = int(rule["threshold"])
+        window = int(rule["window_seconds"])
+    except (KeyError, TypeError, ValueError):
+        return "not_evaluable", "konfigurasi threshold/window_seconds tidak sah", []
+    if not events:
+        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+    cands = [e for e in events if e.get("action") in signals]
+    if not cands:
+        if any(e.get("src_ip") for e in events):
+            return (
+                "no_match",
+                "0 isyarat kegagalan (fixture hanya mengandungi log masuk berjaya)",
+                [],
+            )
+        return "not_evaluable", "medan src_ip tiada dalam set peristiwa", []
+    cands_ip = [e for e in cands if e.get("src_ip")]
+    if not cands_ip:
+        return "not_evaluable", "medan src_ip tiada pada isyarat kegagalan", []
+
+    findings = []
+    by_key = {}
+    for e in cands_ip:
+        by_key.setdefault(e["src_ip"], []).append(e)
+    for key, items in by_key.items():
+        items.sort(key=lambda e: epoch_of(e["ts"]))
+        best = None
+        for i in range(len(items)):
+            j = i
+            while j < len(items) and (
+                epoch_of(items[j]["ts"]) - epoch_of(items[i]["ts"])
+            ) <= window:
+                j += 1
+            n = j - i
+            if n >= threshold and (best is None or n > best[0]):
+                best = (n, i, j)
+        if best is None:
+            continue
+        n, i, j = best
+        win = items[i:j]
+        summary = (
+            f"{n} isyarat kegagalan pengesahan SSH daripada {key} "
+            f"dalam tetingkap {window} saat (ambang {threshold})."
+        )
+        findings.append(
+            finding(
+                rule,
+                n,
+                win[0]["ts"],
+                win[-1]["ts"],
+                key,
+                evidence_for(win, raw_map),
+                summary,
+            )
+        )
+    if not findings:
+        return (
+            "no_match",
+            f"{len(cands_ip)} isyarat kegagalan, tiada kunci mencapai ambang "
+            f"{threshold}/{window}s",
+            [],
+        )
+    return "found", "", findings
+
+
+def eval_sudo(rule, events, raw_map):
+    actions = set(rule.get("actions") or ["sudo_fail", "su_fail"])
+    domain_actions = set(rule.get("domain_actions") or ["sudo", "sudo_fail", "su", "su_fail"])
+    if not events:
+        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+    domain = [e for e in events if e.get("action") in domain_actions]
+    if not domain:
+        return (
+            "not_evaluable",
+            "tiada rekod sudo/su dalam set peristiwa (medan action sudo/su tiada)",
+            [],
+        )
+    failed = [e for e in domain if e.get("action") in actions]
+    if not failed:
+        return (
+            "no_match",
+            f"{len(domain)} rekod sudo/su, tiada kegagalan pengesahan",
+            [],
+        )
+    findings = []
+    by_user = {}
+    for e in failed:
+        by_user.setdefault(e.get("user", ""), []).append(e)
+    for user, items in by_user.items():
+        items.sort(key=lambda e: epoch_of(e["ts"]))
+        label = user or "(pengguna tidak diketahui)"
+        summary = f"{len(items)} pengesahan sudo/su gagal untuk {label}."
+        findings.append(
+            finding(
+                rule,
+                len(items),
+                items[0]["ts"],
+                items[-1]["ts"],
+                user,
+                evidence_for(items, raw_map),
+                summary,
+            )
+        )
+    return "found", "", findings
+
+
+def eval_exec_watch(rule, events, raw_map):
+    if not events:
+        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+    execs = [e for e in events if str(e.get("action", "")).startswith("execve:")]
+    if not execs:
+        return (
+            "not_evaluable",
+            "tiada rekod execve (medan syscall/exe tiada dalam set peristiwa)",
+            [],
+        )
+    watch = {str(w).lower() for w in (rule.get("watch") or [])}
+    matched = []
+    for e in execs:
+        binary = e["action"].split(":", 1)[1].lower()
+        if binary in watch:
+            matched.append(e)
+    if not matched:
+        return (
+            "no_match",
+            f"{len(execs)} rekod execve, tiada sepadan senarai pantau",
+            [],
+        )
+    findings = []
+    grouped = {}
+    for e in matched:
+        binary = e["action"].split(":", 1)[1]
+        grouped.setdefault((e.get("user", ""), binary), []).append(e)
+    for (user, binary), items in grouped.items():
+        items.sort(key=lambda e: epoch_of(e["ts"]))
+        label = user or "(pengguna tidak diketahui)"
+        summary = (
+            f"Pelaksanaan binari dalam senarai pantau: {binary} oleh {label} "
+            f"({len(items)} kali)."
+        )
+        findings.append(
+            finding(
+                rule,
+                len(items),
+                items[0]["ts"],
+                items[-1]["ts"],
+                user,
+                evidence_for(items, raw_map),
+                summary,
+            )
+        )
+    return "found", "", findings
+
+
+def eval_aide(rule, events, raw_map):
+    if not events:
+        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+    matches = [e for e in events if e.get("action") == "aide_change"]
+    if not matches:
+        return (
+            "not_evaluable",
+            "tiada baris laporan AIDE (medan action aide_change tiada)",
+            [],
+        )
+    findings = []
+    grouped = {}
+    for e in matches:
+        grouped.setdefault(e.get("user", ""), []).append(e)
+    for user, items in grouped.items():
+        items.sort(key=lambda e: epoch_of(e["ts"]))
+        label = user or "(pengguna tidak diketahui)"
+        summary = f"AIDE melaporkan perubahan fail ({len(items)} baris) untuk {label}."
+        findings.append(
+            finding(
+                rule,
+                len(items),
+                items[0]["ts"],
+                items[-1]["ts"],
+                user,
+                evidence_for(items, raw_map),
+                summary,
+            )
+        )
+    return "found", "", findings
+
+
+EVALUATORS = {
+    "threshold": eval_threshold,
+    "any_failed": eval_sudo,
+    "exec_watch": eval_exec_watch,
+    "any_match": eval_aide,
+}
+
+
+def parse_since(text: str) -> float:
+    m = re.fullmatch(r"(\d+)([smhd])", text.strip().lower())
+    if not m:
+        die("nilai --since tidak sah; guna contoh 30s, 5m, 2h, 1d")
+    val, unit = int(m.group(1)), m.group(2)
+    mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
+    return val * mult
+
+
+def cmd_detect(args):
+    rules_doc = load_rules()
+    all_events = load_events()
+    raw_map = load_raw_map()
+    since_desc = None
+    events = all_events
+    if args.since:
+        seconds = parse_since(args.since)
+        cutoff = datetime.now(timezone.utc).timestamp() - seconds
+        events = [e for e in all_events if epoch_of(e["ts"]) >= cutoff]
+        since_desc = args.since
+
+    if not all_events:
+        log("Stor peristiwa kosong. Jalankan `kimlogpipe ingest ...` dahulu.")
+    log(
+        f"Peristiwa dinilai: {len(events)}"
+        + (f" (--since {since_desc})" if since_desc else " (semua)")
+    )
+    log("")
+
+    results = []
+    flat = []
+    for rule in rules_doc["rules"]:
+        if not rule.get("enabled", True):
+            results.append(
+                {
+                    "rule": rule["name"],
+                    "severity": rule["severity"],
+                    "status": "disabled",
+                    "reason": "peraturan dimatikan dalam rules.yaml",
+                    "findings": [],
+                }
+            )
+            log(f"{rule['name']}: dimatikan")
+            continue
+        evaluator = EVALUATORS.get(rule.get("type"))
+        if evaluator is None:
+            status, reason, found = (
+                "not_evaluable",
+                f"jenis peraturan tidak dikenali: {rule.get('type')}",
+                [],
+            )
+        else:
+            status, reason, found = evaluator(rule, events, raw_map)
+        if status == "found":
+            log(f"{rule['name']}: {len(found)} dapatan")
+            for f in found:
+                log(
+                    f"  - [{f['severity']}] kunci={f['key'] or '(tiada)'} "
+                    f"kiraan={f['count']} {f['first_ts']} .. {f['last_ts']}"
+                )
+                log(f"    {f['summary_bm']}")
+        elif status == "no_match":
+            log(f"{rule['name']}: tiada padanan ({reason})")
+        elif status == "disabled":
+            log(f"{rule['name']}: dimatikan")
+        else:
+            log(f"{rule['name']}: tidak dapat dinilai ({reason})")
+        results.append(
+            {
+                "rule": rule["name"],
+                "severity": rule["severity"],
+                "status": status,
+                "reason": reason,
+                "findings": found,
+            }
+        )
+        flat.extend(found)
+
+    doc = {
+        "generated_at": now_iso(),
+        "since": since_desc,
+        "event_count": len(events),
+        "rules": results,
+        "findings": flat,
+    }
+    atomic_write(
+        findings_path(),
+        json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
+    )
+    log("")
+    log(f"Jumlah dapatan: {len(flat)}")
+    log(f"Fail dapatan  : {findings_path()}")
+
+
+# ---------------------------------------------------------------------------
+# Laporan Bahasa Melayu
+# ---------------------------------------------------------------------------
+
+
+def cmd_report(_args):
+    events = load_events()
+    fpath = findings_path()
+    doc = None
+    if fpath.is_file():
+        try:
+            doc = json.loads(fpath.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            doc = None
+
+    log("=" * 62)
+    log("LAPORAN KIMLOGPIPE v1")
+    log("=" * 62)
+    log(f"Dijana            : {now_iso()}")
+    log(f"Stor              : {data_dir()}")
+    log("")
+
+    log("PERISTIWA MENGIKUT SUMBER")
+    if not events:
+        log("  (tiada peristiwa; jalankan `kimlogpipe ingest ...`)")
+    else:
+        counts = Counter(e.get("source", "") for e in events)
+        for source, n in sorted(counts.items()):
+            log(f"  {source or '(tidak diketahui)'}: {n}")
+        log(f"  Jumlah: {len(events)}")
+    log("")
+
+    log("DAPATAN MENGIKUT PERATURAN")
+    if doc is None:
+        log("  (belum ada findings.json; jalankan `kimlogpipe detect` dahulu)")
+    else:
+        if doc.get("since"):
+            log(f"  Tetingkap --since: {doc['since']}")
+        for r in doc.get("rules", []):
+            status = r.get("status")
+            if status == "found":
+                log(
+                    f"  {r['rule']} [{r.get('severity','')}]: "
+                    f"{len(r.get('findings', []))} dapatan"
+                )
+                for f in r.get("findings", []):
+                    log(
+                        f"    - kunci={f.get('key') or '(tiada)'} "
+                        f"kiraan={f.get('count')} {f.get('first_ts')} .. {f.get('last_ts')}"
+                    )
+                    log(f"      {f.get('summary_bm','')}")
+            elif status == "no_match":
+                log(f"  {r['rule']} [{r.get('severity','')}]: tiada padanan")
+                if r.get("reason"):
+                    log(f"      sebab: {r['reason']}")
+            elif status == "disabled":
+                log(f"  {r['rule']}: dimatikan")
+            else:
+                log(
+                    f"  {r['rule']} [{r.get('severity','')}]: "
+                    f"tidak dapat dinilai"
+                )
+                if r.get("reason"):
+                    log(f"      sebab: {r['reason']}")
+    log("")
+
+    findings = [] if doc is None else doc.get("findings", [])
+    log("KUNCI TERATAS (src_ip/pengguna)")
+    key_counts = Counter()
+    for f in findings:
+        key = f.get("key") or ""
+        if key:
+            key_counts[key] += int(f.get("count", 0) or 0)
+    if key_counts:
+        key, n = key_counts.most_common(1)[0]
+        log(f"  {key} ({n} peristiwa dalam dapatan)")
+    else:
+        log("  tiada kunci (tiada dapatan)")
+    log("")
+
+    log("NOTA KAVEAT")
+    log("  - journald tidak kekal secara lalai (Storage=volatile); log lama hilang")
+    log("    selepas reboot jika journal tidak disimpan secara berterusan.")
+    log("  - PerSourcePenalties sshd boleh memotong log; percubaan gagal mungkin")
+    log("    muncul sebagai 'drop connection' dan bukan 'Invalid user'. Kedua-dua")
+    log("    isyarat dikira oleh ssh_bruteforce.")
+    log("  - Dalam VM NAT QEMU, semua sumber luar kelihatan sebagai 10.0.2.2;")
+    log("    kunci src_ip tidak membezakan hos sebenar di luar NAT.")
+    log("  - Peraturan yang tiada data dilaporkan 'tidak dapat dinilai', bukan")
+    log("    'tiada serangan'. Tiada dapatan direka.")
+    log("=" * 62)
+
+
+def cmd_rules(_args):
+    doc = load_rules()
+    log(f"PERATURAN KIMLOGPIPE v{VERSION}")
+    log("")
+    for i, rule in enumerate(doc["rules"], 1):
+        log(f"{i}. {rule['name']} [{rule.get('severity','?')}]")
+        if rule.get("description_bm"):
+            log(f"   {rule['description_bm']}")
+        rtype = rule.get("type")
+        if rtype == "threshold":
+            log(
+                f"   Ambang: {rule.get('threshold')} isyarat dalam "
+                f"{rule.get('window_seconds')} saat (kunci: src_ip)"
+            )
+            log(f"   Isyarat: {', '.join(rule.get('signals') or [])}")
+        elif rtype == "any_failed":
+            log(f"   Tindakan gagal: {', '.join(rule.get('actions') or [])}")
+        elif rtype == "exec_watch":
+            log(f"   Senarai pantau: {', '.join(rule.get('watch') or [])}")
+        elif rtype == "any_match":
+            log(f"   Tindakan: {', '.join(rule.get('actions') or [])}")
+        log("")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="kimlogpipe",
+        description="Normalisasi log sistem dan pengesanan berasaskan peraturan (v1).",
+    )
+    p.add_argument("--version", action="version", version=f"KimLogPipe {VERSION}")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    ing = sub.add_parser("ingest", help="serap log ke events.jsonl")
+    ing.add_argument("--source", required=True, choices=["journald", "auditd"])
+    ing.add_argument("--file", help="fail fixture; tanpa ini mod langsung digunakan")
+    ing.set_defaults(func=cmd_ingest)
+
+    rl = sub.add_parser("rules", help="senaraikan peraturan dan ambang")
+    rl.set_defaults(func=cmd_rules)
+
+    det = sub.add_parser("detect", help="jalankan semua peraturan")
+    det.add_argument("--since", help="tetingkap masa, contoh 5m, 2h, 1d")
+    det.set_defaults(func=cmd_detect)
+
+    rep = sub.add_parser("report", help="laporan manusia dalam Bahasa Melayu")
+    rep.set_defaults(func=cmd_report)
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nDihentikan.", file=sys.stderr)
+        sys.exit(130)

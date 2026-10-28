@@ -1,0 +1,54 @@
+# KimLogPipe v1 - definisi peraturan dan ambang.
+# Semua ambang ialah DATA. Enjin tidak menyimpan nilai ambang secara hardcode.
+version: 1
+
+rules:
+  - name: ssh_bruteforce
+    enabled: true
+    severity: high
+    description_bm: "5 atau lebih isyarat kegagalan pengesahan SSH daripada src_ip yang sama dalam tetingkap 5 minit."
+    type: threshold
+    threshold: 5
+    window_seconds: 300
+    key: src_ip
+    # Isyarat kegagalan biasa + isyarat 'drop connection' akibat
+    # PerSourcePenalties yang memotong log sshd.
+    signals:
+      - ssh_auth_failed
+      - ssh_invalid_user
+      - ssh_drop
+
+  - name: sudo_fail
+    enabled: true
+    severity: high
+    description_bm: "Sebarang kegagalan pengesahan sudo atau su."
+    type: any_failed
+    actions:
+      - sudo_fail
+      - su_fail
+    # Digunakan untuk membezakan 'tiada rekod sudo/su' (tidak dapat dinilai)
+    # daripada 'ada rekod tetapi tiada kegagalan' (tiada padanan).
+    domain_actions:
+      - sudo
+      - sudo_fail
+      - su
+      - su_fail
+
+  - name: audit_exec_watch
+    enabled: true
+    severity: medium
+    description_bm: "Pelaksanaan binari dalam senarai pantau melalui execve (auditd)."
+    type: exec_watch
+    watch:
+      - nmap
+      - nc
+      - curl
+      - wget
+
+  - name: aide_change
+    enabled: true
+    severity: medium
+    description_bm: "Sebarang baris laporan AIDE yang menunjukkan fail ditambah, dibuang atau diubah."
+    type: any_match
+    actions:
+      - aide_change

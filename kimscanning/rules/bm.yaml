@@ -152,3 +152,30 @@
   apa: "Flask 0.12.2 terjejas oleh CVE-2023-30861 kerana pengepala Vary: Cookie tidak dihantar."
   bahaya: "Kuki sesi kekal boleh dicache dan didedahkan kepada pengguna lain melalui proksi atau cache."
   buat: "Naik taraf Flask kepada versi yang telah dibaiki dan konfigurasikan cache dengan betul."
+
+# --- Ditambah 28 Okt selepas ujian sebenar: id ini muncul dalam imbasan sebenar
+# tetapi tiada penjelasan. Kesemuanya disalin daripada keluaran sebenar. ---
+
+- tool: gitleaks
+  rule: generic-api-key
+  apa: "Teks yang menyerupai kunci API dijumpai dalam fail projek."
+  bahaya: "Jika ia kunci sebenar, sesiapa yang membacanya boleh guna perkhidmatan berkenaan atas nama anda."
+  buat: "Pindahkan rahsia ke pemboleh ubah persekitaran atau pengurus rahsia, putar semula kunci, dan pastikan fail rahsia tidak dimasukkan ke git."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-aws-secret-access-key.detected-aws-secret-access-key
+  apa: "Kunci rahsia AWS (secret access key) dijumpai dalam kod."
+  bahaya: "Digabungkan dengan Access Key ID, ia memberi akses penuh kepada akaun AWS anda."
+  buat: "Putar semula kunci di AWS serta-merta, buang dari kod dan sejarah git, dan guna peranan IAM atau pemboleh ubah persekitaran."
+
+- tool: trivy
+  rule: aws-access-key-id
+  apa: "Access Key ID AWS dijumpai dalam fail."
+  bahaya: "ID ini mendedahkan akaun AWS anda; bersama kunci rahsia ia membenarkan akses sepenuhnya."
+  buat: "Nyahaktifkan kunci berkenaan di AWS, jana kunci baharu dengan kebenaran minimum, dan simpan di luar repositori."
+
+- tool: trivy
+  rule: aws-secret-access-key
+  apa: "Secret Access Key AWS dijumpai dalam fail."
+  bahaya: "Kunci ini ialah separuh daripada pasangan kelayakan AWS — ia boleh digunakan untuk mengakses sumber awan anda."
+  buat: "Putar semula kunci di AWS, ganti dengan rujukan kepada pengurus rahsia, dan semak log CloudTrail untuk penggunaan yang mencurigakan."

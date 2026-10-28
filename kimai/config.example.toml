@@ -1,0 +1,14 @@
+# KimAI v1 - contoh konfigurasi (pilihan)
+#
+# Salin fail ini ke ~/.config/kimai/config.toml untuk mengaktifkan op "ask".
+# Tanpa fail ini, "kimai ask" akan memulangkan "AI belum dikonfigurasi".
+#
+# v1 TIDAK membuat panggilan rangkaian. Hanya perintah LOKAL dibenarkan.
+# Prompt dihantar melalui stdin dan stdout perintah dikembalikan sebagai jawapan.
+#
+# command = "/usr/local/bin/llm-lokal --stdin"
+#
+# Bentuk jadual juga diterima:
+#
+# [ai]
+# command = "/usr/local/bin/llm-lokal --stdin"
