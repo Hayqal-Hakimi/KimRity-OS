@@ -1,0 +1,917 @@
+#!/usr/bin/env python3
+"""KimScanning v1 — pembalut terminal untuk gate/gate.py.
+
+KimScanning tidak membuat keputusan keselamatan sendiri. Ia menjalankan
+KimRity Security Gate, menyimpan setiap imbasan sebagai objek sesi, memberi
+penjelasan Bahasa Melayu daripada kamus statik (tiada AI), dan mengekalkan
+status dapatan merentas imbasan berulang.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import getpass
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+GATE = os.environ.get("KIMSCAN_GATE") or os.path.normpath(
+    os.path.join(SCRIPT_DIR, "..", "gate", "gate.py")
+)
+RULES_PATH = os.path.join(SCRIPT_DIR, "rules", "bm.yaml")
+
+TOOLS = ["gitleaks", "semgrep", "trivy", "nuclei", "nikto", "nmap", "ssh-audit"]
+EXPECTED = {
+    "repo": ["gitleaks", "semgrep", "trivy"],
+    "web": ["nuclei", "nikto"],
+    "server": ["nmap", "ssh-audit"],
+}
+VERSION_ARGS = {
+    "gitleaks": ["gitleaks", "version"],
+    "semgrep": ["semgrep", "--version"],
+    "trivy": ["trivy", "--version"],
+    "nuclei": ["nuclei", "-version"],
+    "nikto": ["nikto", "-Version"],
+    "nmap": ["nmap", "--version"],
+    "ssh-audit": ["ssh-audit", "--version"],
+}
+STATUSES = ("baru", "diterima", "dibetulkan")
+SEV_ORDER = ["critical", "high", "medium", "low", "info", "unknown"]
+SEV_RANK = {s: i for i, s in enumerate(SEV_ORDER)}
+VERDICT_EXIT = {"LULUS": 0, "BERSYARAT": 2, "TIDAK LULUS": 3}
+GATE_VERDICT = {
+    "LULUS": "LULUS",
+    "LULUS BERSYARAT": "BERSYARAT",
+    "TIDAK LULUS": "TIDAK LULUS",
+}
+
+
+# --------------------------------------------------------------- utiliti
+
+def now_iso() -> str:
+    return (
+        datetime.datetime.now(datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def session_stamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def data_root() -> str:
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg:
+        return os.path.join(xdg, "kimscanning")
+    return os.path.expanduser("~/.local/share/kimscanning")
+
+
+def sessions_root() -> str:
+    return os.path.join(data_root(), "sessions")
+
+
+def ledger_path() -> str:
+    return os.path.join(data_root(), "status.json")
+
+
+def write_json(path: str, obj) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+
+def read_json(path: str):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def new_session_id() -> str:
+    while True:
+        sid = session_stamp()
+        if not os.path.exists(os.path.join(sessions_root(), sid)):
+            return sid
+        time.sleep(1)
+
+
+def all_sessions() -> list:
+    root = sessions_root()
+    if not os.path.isdir(root):
+        return []
+    out = []
+    for sid in sorted(os.listdir(root)):
+        session = read_json(os.path.join(root, sid, "session.json"))
+        if isinstance(session, dict):
+            out.append(session)
+    return out
+
+
+def find_session(arg: str):
+    """Cari sesi mengikut id penuh atau awalan unik."""
+    root = sessions_root()
+    if not os.path.isdir(root):
+        return None, "Tiada sesi disimpan."
+    ids = sorted(
+        d for d in os.listdir(root)
+        if os.path.isfile(os.path.join(root, d, "session.json"))
+    )
+    if arg in ids:
+        return read_json(os.path.join(root, arg, "session.json")), None
+    matches = [d for d in ids if d.startswith(arg)]
+    if len(matches) == 1:
+        return read_json(os.path.join(root, matches[0], "session.json")), None
+    if len(matches) > 1:
+        return None, f"Awalan '{arg}' tidak unik: {', '.join(matches)}. Guna id penuh."
+    return None, f"Sesi '{arg}' tidak dijumpai."
+
+
+def session_path(sid: str) -> str:
+    return os.path.join(sessions_root(), sid, "session.json")
+
+
+def tool_version(name: str) -> str:
+    exe = shutil.which(name)
+    if not exe:
+        return ""
+    try:
+        p = subprocess.run(
+            VERSION_ARGS[name], capture_output=True, text=True, timeout=15
+        )
+        text = ((p.stdout or "") + "\n" + (p.stderr or "")).strip()
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                return line[:80]
+    except (OSError, subprocess.TimeoutExpired, KeyError):
+        pass
+    return "?"
+
+
+def load_rules() -> dict:
+    """Baca rules/bm.yaml. PyYAML digunakan jika ada; ada parser kecil
+    sandaran supaya kimscan tidak bergantung pada pakej luar."""
+    entries = None
+    try:
+        import yaml  # type: ignore
+        with open(RULES_PATH, encoding="utf-8") as fh:
+            entries = yaml.safe_load(fh)
+    except ImportError:
+        entries = parse_yaml_fallback()
+    except Exception as exc:  # YAML rosak / fail tiada
+        print(f"amaran: kamus rule tidak dapat dibaca: {exc}", file=sys.stderr)
+        return {}
+    rules = {}
+    for item in entries or []:
+        if not isinstance(item, dict):
+            continue
+        tool = str(item.get("tool", "")).strip()
+        rule = str(item.get("rule", "")).strip()
+        if not tool or not rule:
+            continue
+        rules[f"{tool}|{rule}"] = {
+            "apa": str(item.get("apa", "")).strip(),
+            "bahaya": str(item.get("bahaya", "")).strip(),
+            "buat": str(item.get("buat", "")).strip(),
+        }
+    return rules
+
+
+def parse_yaml_fallback():
+    """Parser untuk bentuk senarai rata yang digunakan bm.yaml."""
+    try:
+        with open(RULES_PATH, encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+    entries, cur = [], None
+    for raw in lines:
+        line = raw.rstrip("\n")
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- "):
+            if cur is not None:
+                entries.append(cur)
+            cur = {}
+            stripped = stripped[2:].strip()
+        if cur is None or ":" not in stripped:
+            continue
+        key, _, val = stripped.partition(":")
+        val = val.strip()
+        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+            try:
+                val = json.loads(val)
+            except json.JSONDecodeError:
+                val = val[1:-1]
+        elif len(val) >= 2 and val[0] == "'" and val[-1] == "'":
+            val = val[1:-1].replace("''", "'")
+        cur[key.strip()] = val
+    if cur is not None:
+        entries.append(cur)
+    return entries
+
+
+def load_ledger() -> dict:
+    data = read_json(ledger_path())
+    return data if isinstance(data, dict) else {}
+
+
+def save_ledger(ledger: dict) -> None:
+    write_json(ledger_path(), ledger)
+
+
+def ledger_key(kind: str, target: str, fp: str) -> str:
+    return f"{kind}|{target}|{fp}"
+
+
+# --------------------------------------------------------------- laporan
+
+def print_session(session: dict) -> None:
+    verdict = session.get("verdict", "?")
+    counts = session.get("counts", {})
+    print("=" * 68)
+    print(f" KIMSCANNING v1   |   {verdict}")
+    print("=" * 68)
+    print(f"Sesi      : {session.get('id')}")
+    print(f"Jenis     : {session.get('kind')}  ({session.get('profile')})")
+    print(f"Sasaran   : {session.get('target')}")
+    print(f"Masa      : {session.get('started')} -> {session.get('finished')}")
+    auth = session.get("authorized", {})
+    if session.get("kind") in ("web", "server"):
+        status = "ya" if auth.get("granted") else "tidak"
+        print(f"Kebenaran : {status} (skop: {auth.get('scope') or '-'})")
+    print(
+        "Kiraan    : "
+        f"critical={counts.get('critical', 0)} "
+        f"high={counts.get('high', 0)} "
+        f"medium={counts.get('medium', 0)} "
+        f"low={counts.get('low', 0)}"
+    )
+
+    print("\nALAT:")
+    for scanner in session.get("scanners", []):
+        rc = scanner.get("rc")
+        rc_text = "-" if rc is None else str(rc)
+        print(
+            f"  {scanner.get('name', '?'):<10} "
+            f"{scanner.get('status', '?'):<8} rc={rc_text:<3} "
+            f"{scanner.get('reason', '')}"
+        )
+
+    findings = session.get("findings", [])
+    print(f"\nDAPATAN ({len(findings)}):")
+    if not findings:
+        print("  Tiada dapatan dilaporkan.")
+        return
+
+    grouped = {}
+    for f in findings:
+        grouped.setdefault(str(f.get("file") or "?"), []).append(f)
+    for file in sorted(grouped):
+        print(f"\n  {file}")
+        rows = sorted(
+            grouped[file],
+            key=lambda x: (
+                SEV_RANK.get(str(x.get("severity", "unknown")).lower(), 99),
+                str(x.get("tool", "")),
+                int(x.get("line") or 0),
+                str(x.get("rule", "")),
+            ),
+        )
+        for f in rows:
+            sev = str(f.get("severity", "unknown")).upper()
+            line = f.get("line") or 0
+            print(
+                f"    [{sev}] {f.get('tool')}/{f.get('rule')} "
+                f"(baris {line}) — status: {f.get('status')}"
+            )
+            exp = f.get("explanation")
+            if isinstance(exp, dict):
+                print(f"      APA    : {exp.get('apa', '')}")
+                print(f"      BAHAYA : {exp.get('bahaya', '')}")
+                print(f"      BUAT   : {exp.get('buat', '')}")
+            else:
+                print("      APA    : [tiada penjelasan]")
+                print("      BAHAYA : [tiada penjelasan]")
+                print("      BUAT   : [tiada penjelasan]")
+            print(f"      BUKTI  : {f.get('evidence', '')}")
+
+
+def write_report(session: dict, path: str) -> None:
+    counts = session.get("counts", {})
+    lines = [
+        "# Laporan KimScanning",
+        "",
+        f"**Sesi:** `{session.get('id')}`  ",
+        f"**Jenis:** {session.get('kind')} ({session.get('profile')})  ",
+        f"**Sasaran:** `{session.get('target')}`  ",
+        f"**Masa:** {session.get('started')} -> {session.get('finished')}  ",
+        f"**Verdict:** **{session.get('verdict')}**",
+        "",
+    ]
+    auth = session.get("authorized", {})
+    if session.get("kind") in ("web", "server"):
+        lines += [
+            f"**Kebenaran:** {'ya' if auth.get('granted') else 'tidak'}  ",
+            f"**Skop:** `{auth.get('scope') or '-'}`  ",
+            "",
+        ]
+
+    lines += [
+        "## Kiraan isu",
+        "",
+        "| Tahap | Bilangan |",
+        "|---|---:|",
+        f"| critical | {counts.get('critical', 0)} |",
+        f"| high | {counts.get('high', 0)} |",
+        f"| medium | {counts.get('medium', 0)} |",
+        f"| low | {counts.get('low', 0)} |",
+        "",
+        "## Alat",
+        "",
+        "| Alat | Status | RC | Sebab |",
+        "|---|---|---:|---|",
+    ]
+    for scanner in session.get("scanners", []):
+        reason = str(scanner.get("reason", "")).replace("|", "/")
+        rc = scanner.get("rc")
+        lines.append(
+            f"| {scanner.get('name')} | {scanner.get('status')} | "
+            f"{'-' if rc is None else rc} | {reason} |"
+        )
+
+    findings = session.get("findings", [])
+    lines += ["", f"## Dapatan ({len(findings)})", ""]
+    if not findings:
+        lines.append("_Tiada dapatan dilaporkan._")
+    else:
+        grouped = {}
+        for f in findings:
+            grouped.setdefault(str(f.get("file") or "?"), []).append(f)
+        for file in sorted(grouped):
+            lines += [f"### `{file}`", ""]
+            rows = sorted(
+                grouped[file],
+                key=lambda x: (
+                    SEV_RANK.get(str(x.get("severity", "unknown")).lower(), 99),
+                    str(x.get("tool", "")),
+                    int(x.get("line") or 0),
+                    str(x.get("rule", "")),
+                ),
+            )
+            for f in rows:
+                sev = str(f.get("severity", "unknown")).upper()
+                lines += [
+                    f"#### [{sev}] `{f.get('tool')}/{f.get('rule')}` — "
+                    f"baris {f.get('line') or 0}",
+                    "",
+                    f"- **Status:** {f.get('status')}",
+                    f"- **Pertama dilihat:** {f.get('first_seen')}",
+                    f"- **Terakhir dilihat:** {f.get('last_seen')}",
+                ]
+                exp = f.get("explanation")
+                if isinstance(exp, dict):
+                    lines += [
+                        f"- **APA:** {exp.get('apa', '')}",
+                        f"- **BAHAYA:** {exp.get('bahaya', '')}",
+                        f"- **BUAT:** {exp.get('buat', '')}",
+                    ]
+                else:
+                    lines += [
+                        "- **APA:** [tiada penjelasan]",
+                        "- **BAHAYA:** [tiada penjelasan]",
+                        "- **BUAT:** [tiada penjelasan]",
+                    ]
+                lines += [f"- **Bukti:** {f.get('evidence', '')}", ""]
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines).rstrip() + "\n")
+
+
+# --------------------------------------------------------------- imbasan
+
+def json_emit(obj: dict) -> None:
+    print(json.dumps(obj, ensure_ascii=False), flush=True)
+
+
+def fail(message: str) -> int:
+    print(f"RALAT: {message}", file=sys.stderr)
+    return 1
+
+
+def run_scan(kind: str, argv: list) -> int:
+    parser = argparse.ArgumentParser(prog=f"kimscan {kind}", add_help=False)
+    parser.add_argument("target")
+    parser.add_argument("--authorized", action="store_true")
+    parser.add_argument("--scope", default=None)
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--fail-on", choices=["critical", "high", "medium"], default="high")
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+
+    if args.help:
+        print_scan_help(kind)
+        return 0
+
+    if kind in ("web", "server") and not args.authorized:
+        return fail(
+            f"imbasan {kind} ialah imbasan aktif dan memerlukan --authorized. "
+            "Sahkan dahulu bahawa anda mempunyai kebenaran bertulis untuk "
+            "menyasar sasaran ini."
+        )
+
+    target = args.target
+    if kind == "repo":
+        target = os.path.abspath(target)
+        if not os.path.isdir(target):
+            return fail(f"bukan folder: {target}")
+    elif kind == "web":
+        if not target.startswith(("http://", "https://")):
+            return fail("sasaran web mesti bermula dengan http:// atau https://")
+    else:
+        if not target.strip():
+            return fail("sasaran server tidak boleh kosong")
+
+    if args.scope and not os.path.isfile(args.scope):
+        return fail(f"fail skop tidak boleh dibaca: {args.scope}")
+    if not os.path.isfile(GATE):
+        return fail(f"gate.py tidak dijumpai: {GATE}")
+
+    sid = new_session_id()
+    sdir = os.path.join(sessions_root(), sid)
+    raw_dir = os.path.join(sdir, "raw")
+    gate_out = os.path.join(sdir, ".gate")
+    try:
+        os.makedirs(raw_dir, exist_ok=True)
+    except OSError as exc:
+        return fail(f"tidak dapat mencipta sesi: {exc}")
+
+    started = now_iso()
+    auth = {
+        "granted": bool(args.authorized),
+        "who": getpass.getuser() if hasattr(getpass, "getuser") else os.environ.get("USER", "?"),
+        "when": started,
+        "scope": args.scope,
+    }
+
+    if args.json:
+        json_emit(
+            {
+                "phase": "start",
+                "id": sid,
+                "kind": kind,
+                "target": target,
+                "started": started,
+            }
+        )
+
+    cmd = [
+        sys.executable,
+        GATE,
+        target,
+        "--kind",
+        kind,
+        "--out",
+        gate_out,
+        "--fail-on",
+        args.fail_on,
+        "--quiet",
+    ]
+    if args.authorized:
+        cmd.append("--authorized")
+    if args.scope:
+        cmd += ["--scope", args.scope]
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        shutil.rmtree(sdir, ignore_errors=True)
+        return fail(f"gate tidak dapat dijalankan: {exc}")
+
+    gate_json_path = os.path.join(gate_out, "gate.json")
+    gate = read_json(gate_json_path)
+    if not isinstance(gate, dict):
+        detail = (proc.stderr or proc.stdout or "").strip()
+        shutil.rmtree(sdir, ignore_errors=True)
+        return fail(f"gate gagal menghasilkan gate.json (rc={proc.returncode}). {detail[:400]}")
+
+    # Pindahkan bukti mentah ke dalam sesi.
+    raw_src = os.path.join(gate_out, ".raw")
+    if os.path.isdir(raw_src):
+        for name in os.listdir(raw_src):
+            src = os.path.join(raw_src, name)
+            dst = os.path.join(raw_dir, name)
+            try:
+                shutil.move(src, dst)
+            except OSError:
+                pass
+    try:
+        shutil.copy2(gate_json_path, os.path.join(raw_dir, "gate.json"))
+    except OSError:
+        pass
+    laporan = os.path.join(gate_out, "laporan.md")
+    if os.path.isfile(laporan):
+        try:
+            shutil.copy2(laporan, os.path.join(raw_dir, "laporan-gate.md"))
+        except OSError:
+            pass
+    shutil.rmtree(gate_out, ignore_errors=True)
+
+    meta = gate.get("meta") or {}
+    tools = meta.get("tools") or {}
+    errors = gate.get("tool_errors") or {}
+    scanners = []
+    for name in EXPECTED.get(kind, []):
+        if name not in tools:
+            scanners.append(
+                {"name": name, "status": "skipped", "rc": None,
+                 "reason": "tidak dijalankan oleh gate"}
+            )
+        elif name in errors or tools.get(name) is None:
+            scanners.append(
+                {"name": name, "status": "failed", "rc": 1,
+                 "reason": str(errors.get(name, "alat gagal dijalankan"))[:300]}
+            )
+        else:
+            scanners.append(
+                {"name": name, "status": "done", "rc": 0, "reason": "selesai"}
+            )
+
+    rules = load_rules()
+    ledger = load_ledger()
+
+    # Sejarah untuk kind+sasaran yang sama, tertua -> terbaru.
+    history = [
+        s for s in all_sessions()
+        if s.get("kind") == kind and s.get("target") == target and s.get("id") != sid
+    ]
+    history.sort(key=lambda s: (str(s.get("started") or ""), str(s.get("id") or "")))
+    prior = {}
+    for old in history:
+        old_started = old.get("started") or started
+        for pf in old.get("findings", []) or []:
+            fp = pf.get("fp")
+            if not fp:
+                continue
+            rec = prior.get(fp)
+            first_seen = pf.get("first_seen") or old_started
+            if rec is None:
+                prior[fp] = {
+                    "status": pf.get("status", "baru"),
+                    "first_seen": first_seen,
+                }
+            else:
+                rec["status"] = pf.get("status", "baru")
+                if first_seen and (
+                    not rec["first_seen"] or str(first_seen) < str(rec["first_seen"])
+                ):
+                    rec["first_seen"] = first_seen
+
+    finished = now_iso()
+    findings = []
+    for item in gate.get("findings", []) or []:
+        tool = str(item.get("tool", "?"))
+        rule = str(item.get("rule", "?"))
+        file = str(item.get("file", "?"))
+        try:
+            line = int(item.get("line") or 0)
+        except (TypeError, ValueError):
+            line = 0
+        message = str(item.get("message", ""))[:500]
+        fp = hashlib.sha1(
+            f"{tool}|{rule}|{file}|{line}".encode("utf-8")
+        ).hexdigest()[:12]
+        old = prior.get(fp)
+        status = old["status"] if old else "baru"
+        first_seen = old["first_seen"] if old else started
+        overwrite = ledger.get(ledger_key(kind, target, fp))
+        if isinstance(overwrite, dict) and overwrite.get("status") in STATUSES:
+            status = overwrite["status"]
+        if status not in STATUSES:
+            status = "baru"
+        evidence = f"{file}:{line} — {message}".strip(" —")
+        findings.append(
+            {
+                "fp": fp,
+                "tool": tool,
+                "rule": rule,
+                "severity": str(item.get("severity", "unknown")).lower(),
+                "file": file,
+                "line": line,
+                "message": message,
+                "evidence": evidence,
+                "explanation": rules.get(f"{tool}|{rule}"),
+                "status": status,
+                "first_seen": first_seen,
+                "last_seen": finished,
+            }
+        )
+
+    raw_counts = gate.get("counts") or {}
+    session = {
+        "id": sid,
+        "kind": kind,
+        "target": target,
+        "profile": f"{kind}-standard",
+        "authorized": auth,
+        "started": started,
+        "finished": finished,
+        "verdict": GATE_VERDICT.get(str(gate.get("verdict")), "TIDAK LULUS"),
+        "scanners": scanners,
+        "counts": {
+            "critical": int(raw_counts.get("critical", 0) or 0),
+            "high": int(raw_counts.get("high", 0) or 0),
+            "medium": int(raw_counts.get("medium", 0) or 0),
+            "low": int(raw_counts.get("low", 0) or 0),
+        },
+        "findings": findings,
+    }
+
+    write_json(os.path.join(sdir, "session.json"), session)
+    write_report(session, os.path.join(sdir, "report.md"))
+
+    code = VERDICT_EXIT.get(session["verdict"], 3)
+    if args.json:
+        for scanner in scanners:
+            json_emit(
+                {
+                    "phase": "scanner",
+                    "name": scanner["name"],
+                    "status": scanner["status"],
+                    "rc": scanner["rc"],
+                    "reason": scanner["reason"],
+                }
+            )
+        json_emit(
+            {
+                "phase": "done",
+                "id": sid,
+                "verdict": session["verdict"],
+                "counts": session["counts"],
+                "exit": code,
+            }
+        )
+    else:
+        print_session(session)
+    return code
+
+
+# -------------------------------------------------------------- perintah
+
+def cmd_list(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan list", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+    if args.help:
+        print("Guna: kimscan list\n\nSenaraikan semua sesi yang disimpan.")
+        return 0
+    sessions = all_sessions()
+    if not sessions:
+        print("Tiada sesi lagi. Jalankan: kimscan repo <folder>")
+        return 0
+    print(f"{'ID':<18} {'JENIS':<7} {'VERDICT':<14} {'C/H/M/L':<12} SASARAN")
+    for s in sessions:
+        c = s.get("counts", {})
+        counts = f"{c.get('critical', 0)}/{c.get('high', 0)}/{c.get('medium', 0)}/{c.get('low', 0)}"
+        print(
+            f"{str(s.get('id')):<18} {str(s.get('kind')):<7} "
+            f"{str(s.get('verdict')):<14} {counts:<12} {s.get('target')}"
+        )
+    return 0
+
+
+def cmd_show(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan show", add_help=False)
+    parser.add_argument("id")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+    if args.help:
+        print("Guna: kimscan show <id> [--json]\n\nTunjuk satu sesi penuh.")
+        return 0
+    session, err = find_session(args.id)
+    if session is None:
+        return fail(err or "sesi tidak dijumpai")
+    if args.json:
+        print(json.dumps(session, ensure_ascii=False, indent=2))
+    else:
+        print_session(session)
+    return 0
+
+
+def cmd_status(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan status", add_help=False)
+    parser.add_argument("id")
+    parser.add_argument("fp")
+    parser.add_argument("status", choices=STATUSES)
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+    if args.help:
+        print(
+            "Guna: kimscan status <id> <fp> baru|diterima|dibetulkan\n\n"
+            "Tukar status satu dapatan. Status disimpan dalam sesi dan "
+            "diwarisi oleh imbasan seterusnya bagi kind+sasaran yang sama."
+        )
+        return 0
+    session, err = find_session(args.id)
+    if session is None:
+        return fail(err or "sesi tidak dijumpai")
+    target_fp = None
+    for f in session.get("findings", []) or []:
+        if f.get("fp") == args.fp:
+            target_fp = f
+            break
+    if target_fp is None:
+        return fail(f"fp '{args.fp}' tidak dijumpai dalam sesi {session.get('id')}")
+    target_fp["status"] = args.status
+    write_json(session_path(session["id"]), session)
+    write_report(session, os.path.join(sessions_root(), session["id"], "report.md"))
+    ledger = load_ledger()
+    ledger[ledger_key(str(session.get("kind")), str(session.get("target")), args.fp)] = {
+        "status": args.status,
+        "when": now_iso(),
+    }
+    save_ledger(ledger)
+    print(
+        f"Status {args.fp} dalam sesi {session['id']} ditukar kepada "
+        f"'{args.status}'."
+    )
+    return 0
+
+
+def cmd_rules(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan rules", add_help=False)
+    parser.add_argument("--missing", action="store_true")
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+    if args.help:
+        print(
+            "Guna: kimscan rules [--missing]\n\n"
+            "Senaraikan kamus rule BM, atau rule id yang pernah dilihat tetapi "
+            "tiada dalam kamus."
+        )
+        return 0
+    rules = load_rules()
+    if not args.missing:
+        print(f"Kamus rule BM: {len(rules)} entri ({RULES_PATH})")
+        for key in sorted(rules):
+            tool, _, rule = key.partition("|")
+            print(f"  {tool:<10} {rule}")
+        return 0
+
+    seen = {}
+    for session in all_sessions():
+        for f in session.get("findings", []) or []:
+            tool = str(f.get("tool") or "")
+            rule = str(f.get("rule") or "")
+            if not tool or not rule:
+                continue
+            key = (tool, rule)
+            rec = seen.setdefault(key, {"count": 0, "sessions": set()})
+            rec["count"] += 1
+            rec["sessions"].add(str(session.get("id")))
+    missing = sorted(
+        (tool, rule, rec) for (tool, rule), rec in seen.items()
+        if f"{tool}|{rule}" not in rules
+    )
+    print(f"Kamus rule BM: {len(rules)} entri")
+    print(f"Rule id dilihat dalam sesi: {len(seen)}")
+    print(f"Rule id tiada penjelasan: {len(missing)}")
+    if not missing:
+        print("Tiada rule id hilang — semua rule yang dilihat ada dalam kamus.")
+        return 0
+    for tool, rule, rec in missing:
+        n_sess = len(rec["sessions"])
+        print(f"  {tool}/{rule}  ({rec['count']} dapatan, {n_sess} sesi)")
+    return 0
+
+
+def cmd_doctor(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan doctor", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+    if args.help:
+        print("Guna: kimscan doctor\n\nPeriksa alat pengimbas yang tersedia.")
+        return 0
+    print("Pemeriksaan KimScanning")
+    print(f"{'ALAT':<12} {'STATUS':<12} VERSI")
+    for name in TOOLS:
+        path = shutil.which(name)
+        if path:
+            print(f"{name:<12} {'tersedia':<12} {tool_version(name)}")
+        else:
+            print(f"{name:<12} {'tiada':<12} -")
+    print()
+    print(f"gate.py : {GATE} ({'ada' if os.path.isfile(GATE) else 'TIADA'})")
+    rules = load_rules()
+    print(f"kamus   : {RULES_PATH} ({len(rules)} entri)")
+    print(f"data    : {data_root()}")
+    return 0
+
+
+def print_scan_help(kind: str) -> None:
+    print(
+        f"Guna: kimscan {kind} <sasaran> [--authorized] [--scope S] "
+        "[--json] [--fail-on critical|high|medium]"
+    )
+    if kind == "repo":
+        print("\nrepo: folder/repo tempatan. Guna gitleaks + semgrep + trivy.")
+    elif kind == "web":
+        print("\nweb: URL http/https. Imbasan aktif — --authorized WAJIB.")
+    else:
+        print("\nserver: host/IP. Imbasan aktif — --authorized WAJIB.")
+    print("\n--json mencetak NDJSON kemajuan ke stdout.")
+
+
+def print_help() -> None:
+    print(
+        """KimScanning v1 — pengimbas terminal melalui KimRity Security Gate
+
+GUNA:
+  kimscan repo <folder> [--scope S] [--json] [--fail-on T]
+  kimscan web <url> --authorized [--scope S] [--json] [--fail-on T]
+  kimscan server <host> --authorized [--scope S] [--json] [--fail-on T]
+  kimscan list
+  kimscan show <id> [--json]
+  kimscan status <id> <fp> baru|diterima|dibetulkan
+  kimscan rules [--missing]
+  kimscan doctor
+  kimscan help
+
+CONTOH:
+  kimscan repo .
+  kimscan repo ~/projek --fail-on medium
+  kimscan web https://127.0.0.1 --authorized --scope skop.txt
+  kimscan show 20261028T120000Z
+  kimscan status 20261028T120000Z a1b2c3d4e5f6 diterima
+  kimscan rules --missing
+
+KOD KELUAR:
+  0  LULUS
+  1  ralat penggunaan / pengawal kebenaran
+  2  BERSYARAT
+  3  TIDAK LULUS
+
+Sesi disimpan di $XDG_DATA_HOME/kimscanning/sessions/
+(lalai: ~/.local/share/kimscanning/sessions/).
+Penjelasan dapatan datang daripada kamus statik rules/bm.yaml — tiada AI.
+"""
+    )
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("help", "-h", "--help"):
+        print_help()
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd in EXPECTED:
+        return run_scan(cmd, rest)
+    if cmd == "list":
+        return cmd_list(rest)
+    if cmd == "show":
+        return cmd_show(rest)
+    if cmd == "status":
+        return cmd_status(rest)
+    if cmd == "rules":
+        return cmd_rules(rest)
+    if cmd == "doctor":
+        return cmd_doctor(rest)
+    print(f"RALAT: perintah tidak dikenali: {cmd}", file=sys.stderr)
+    print("Guna `kimscan help` untuk senarai perintah.", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

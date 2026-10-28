@@ -1,0 +1,154 @@
+# Kamus penjelasan KimScanning (Bahasa Melayu, tanpa AI).
+# Setiap entri memetakan tool + rule kepada apa / bahaya / buat.
+# Semua rule id di bawah disalin daripada keluaran sebenar gitleaks,
+# semgrep dan trivy melalui gate/gate.py. Jangan tambah id rekaan.
+
+- tool: gitleaks
+  rule: aws-access-token
+  apa: "Kunci akses AWS dijumpai dalam fail projek."
+  bahaya: "Sesiapa yang memegang kunci ini boleh mengakses akaun AWS, membelanjakan kos, atau memadam sumber awan."
+  buat: "Buang kunci daripada kod dan sejarah git, putar semula kunci di AWS, dan simpan rahsia dalam pengurus rahsia."
+
+- tool: gitleaks
+  rule: github-pat
+  apa: "Personal Access Token GitHub dijumpai dalam fail projek."
+  bahaya: "Token ini boleh memberi akses kepada repositori, organisasi, atau tindakan automasi atas nama pemiliknya."
+  buat: "Batalkan token di GitHub, jana token baharu dengan skop minimum, dan simpan hanya dalam pemboleh ubah persekitaran atau pengurus rahsia."
+
+- tool: gitleaks
+  rule: slack-legacy-bot-token
+  apa: "Token bot Slack lama dijumpai dalam fail projek."
+  bahaya: "Token ini boleh digunakan untuk membaca mesej, menyamar sebagai bot, atau menyalahgunakan ruang kerja Slack."
+  buat: "Batalkan token lama di Slack, jana token baharu, dan simpan token di luar repositori kod."
+
+- tool: gitleaks
+  rule: stripe-access-token
+  apa: "Kunci Stripe dijumpai dalam fail projek."
+  bahaya: "Kunci ini boleh mendedahkan data pembayaran atau membenarkan caj dan pemindahan dana dalam akaun Stripe."
+  buat: "Putar semula kunci di papan pemuka Stripe, batal kunci lama, dan gunakan kunci terhad melalui pemboleh ubah persekitaran."
+
+- tool: semgrep
+  rule: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
+  apa: "Kod memanggil subprocess dengan shell=True."
+  bahaya: "Input pengguna yang masuk ke dalam arahan shell boleh menyebabkan suntikan arahan dan pelaksanaan kod sewenang-wenangnya."
+  buat: "Gunakan senarai argumen tanpa shell=True, atau sahkan dan hadkan input dengan ketat sebelum memanggil proses."
+
+- tool: semgrep
+  rule: python.lang.security.deserialization.pickle.avoid-pickle
+  apa: "Kod menggunakan pickle untuk menyahserialisasi data."
+  bahaya: "Data pickle yang tidak dipercayai boleh melaksanakan kod sewenang-wenangnya semasa dimuatkan."
+  buat: "Elakkan pickle untuk data luar; gunakan format selamat seperti JSON dan sahkan skema data."
+
+- tool: semgrep
+  rule: python.lang.security.audit.eval-detected.eval-detected
+  apa: "Kod menggunakan eval() pada data yang mungkin datang daripada pengguna."
+  bahaya: "eval() boleh melaksanakan ungkapan Python sewenang-wenangnya dan membuka jalan kepada pengambilalihan sistem."
+  buat: "Gantikan eval() dengan penghurai atau pemetaan nilai yang dibenarkan, dan jangan sekali-kali menilai input pengguna."
+
+- tool: semgrep
+  rule: python.lang.security.audit.formatted-sql-query.formatted-sql-query
+  apa: "Kueri SQL dibina dengan pemformatan string."
+  bahaya: "Input pengguna boleh mengubah struktur SQL dan menyebabkan suntikan SQL, kebocoran data, atau pemadaman rekod."
+  buat: "Gunakan kueri berparameter atau ORM dengan pengikatan parameter, bukan pemformatan string."
+
+- tool: semgrep
+  rule: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+  apa: "Kueri SQL mentah dijalankan melalui SQLAlchemy dengan input yang tidak diikat."
+  bahaya: "Input pengguna boleh disuntik ke dalam SQL dan mengakses atau mengubah data tanpa kebenaran."
+  buat: "Gunakan parameter terikat dalam text() SQLAlchemy atau API ORM yang selamat."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value
+  apa: "Corak ID kunci akses AWS dikesan dalam fail."
+  bahaya: "ID kunci yang terdedah boleh membantu penyerang mengenal pasti dan menyalahgunakan akaun AWS."
+  buat: "Buang nilai kunci daripada kod, putar semula kunci, dan gunakan peranan IAM atau pengurus rahsia."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-github-token.detected-github-token
+  apa: "Corak token GitHub dikesan dalam fail."
+  bahaya: "Token yang terdedah boleh memberi akses kepada kod, isu, atau automasi GitHub."
+  buat: "Batalkan token di GitHub, jana token baharu dengan kebenaran minimum, dan simpan di luar repositori."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key
+  apa: "Corak kunci API Stripe dikesan dalam fail."
+  bahaya: "Kunci Stripe yang terdedah boleh membenarkan akses kepada data pembayaran dan operasi kewangan."
+  buat: "Putar semula kunci Stripe, batal kunci lama, dan gunakan storan rahsia yang selamat."
+
+- tool: semgrep
+  rule: javascript.lang.security.detect-child-process.detect-child-process
+  apa: "Kod JavaScript memanggil child_process untuk menjalankan arahan sistem."
+  bahaya: "Jika input pengguna masuk ke dalam arahan, penyerang boleh melaksanakan arahan sistem dan mengawal pelayan."
+  buat: "Elakkan shell, gunakan senarai argumen tetap, dan sahkan semua input sebelum menjalankan proses."
+
+- tool: trivy
+  rule: CVE-2019-19844
+  apa: "Django 3.0.0 terjejas oleh CVE-2019-19844 melalui pengendalian alamat e-mel yang direka."
+  bahaya: "Penyerang boleh mengambil alih akaun pengguna melalui aliran set semula kata laluan."
+  buat: "Naik taraf Django kepada versi yang telah dibaiki dan uji semula aliran set semula kata laluan."
+
+- tool: trivy
+  rule: CVE-2020-7471
+  apa: "Django 3.0.0 terjejas oleh CVE-2020-7471 melalui StringAgg dengan pemisah yang tidak dipercayai."
+  bahaya: "Input yang direka boleh menyebabkan suntikan SQL dan pendedahan atau perubahan data."
+  buat: "Naik taraf Django kepada versi yang telah dibaiki dan elakkan pemisah StringAgg daripada input pengguna."
+
+- tool: trivy
+  rule: CVE-2021-35042
+  apa: "Django 3.0.0 terjejas oleh CVE-2021-35042 melalui input order_by yang tidak disanitasi."
+  bahaya: "Penyerang boleh menyuntik SQL melalui parameter susunan dan membaca data sensitif."
+  buat: "Naik taraf Django kepada versi yang telah dibaiki dan hadkan nilai order_by kepada senarai putih."
+
+- tool: trivy
+  rule: CVE-2025-64459
+  apa: "Django 3.0.0 terjejas oleh CVE-2025-64459, satu lagi kerentanan suntikan SQL."
+  bahaya: "Input yang direka boleh mengubah kueri dan mendedahkan atau memusnahkan data aplikasi."
+  buat: "Naik taraf Django kepada versi terkini yang telah dibaiki dan gunakan kueri berparameter."
+
+- tool: trivy
+  rule: CVE-2020-13254
+  apa: "Django 3.0.0 terjejas oleh CVE-2020-13254 melalui kunci memcached yang rosak."
+  bahaya: "Data cache boleh bocor atau bercampur antara pengguna, menyebabkan pendedahan maklumat."
+  buat: "Naik taraf Django kepada versi yang telah dibaiki dan semak konfigurasi cache memcached."
+
+- tool: trivy
+  rule: CVE-2019-20477
+  apa: "PyYAML 5.1 terjejas oleh CVE-2019-20477 melalui pemuat FullLoader."
+  bahaya: "Fail YAML yang tidak dipercayai boleh melaksanakan arahan pada pelayan."
+  buat: "Naik taraf PyYAML dan gunakan safe_load() untuk semua data YAML yang tidak dipercayai."
+
+- tool: trivy
+  rule: CVE-2020-14343
+  apa: "PyYAML 5.1 terjejas oleh CVE-2020-14343 kerana pembaikan keselamatan sebelumnya tidak lengkap."
+  bahaya: "Penyerang masih boleh melaksanakan kod melalui pembinaan objek dalam YAML."
+  buat: "Naik taraf PyYAML kepada versi yang telah dibaiki dan elakkan pemuat tidak selamat."
+
+- tool: trivy
+  rule: CVE-2020-1747
+  apa: "PyYAML 5.1 terjejas oleh CVE-2020-1747 melalui python/object/new semasa menggunakan FullLoader."
+  bahaya: "YAML yang direka boleh menjalankan arahan sewenang-wenangnya pada sistem."
+  buat: "Naik taraf PyYAML dan gunakan safe_load() atau pemuat terhad."
+
+- tool: trivy
+  rule: CVE-2018-1000656
+  apa: "Flask 0.12.2 terjejas oleh CVE-2018-1000656 melalui fail JSON yang direka."
+  bahaya: "Penyerang boleh menyebabkan penggunaan memori berlebihan atau keengganan perkhidmatan."
+  buat: "Naik taraf Flask kepada versi yang telah dibaiki dan hadkan saiz muatan JSON."
+
+- tool: trivy
+  rule: CVE-2018-18074
+  apa: "requests 2.19.0 terjejas oleh CVE-2018-18074 semasa pengalihan HTTPS ke HTTP."
+  bahaya: "Pengepala Authorization boleh dihantar semula ke hos yang tidak selamat dan mendedahkan kelayakan."
+  buat: "Naik taraf requests kepada versi yang telah dibaiki dan elakkan pengalihan ke HTTP."
+
+- tool: trivy
+  rule: CVE-2023-32681
+  apa: "requests 2.19.0 terjejas oleh CVE-2023-32681 melalui kebocoran pengepala Proxy-Authorization."
+  bahaya: "Kelayakan proksi boleh bocor kepada hos lain semasa pengalihan atau permintaan berturut-turut."
+  buat: "Naik taraf requests kepada versi yang telah dibaiki dan semak konfigurasi proksi."
+
+- tool: trivy
+  rule: CVE-2023-30861
+  apa: "Flask 0.12.2 terjejas oleh CVE-2023-30861 kerana pengepala Vary: Cookie tidak dihantar."
+  bahaya: "Kuki sesi kekal boleh dicache dan didedahkan kepada pengguna lain melalui proksi atau cache."
+  buat: "Naik taraf Flask kepada versi yang telah dibaiki dan konfigurasikan cache dengan betul."
