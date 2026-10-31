@@ -1,40 +1,40 @@
 #!/bin/sh
-# workspace-launch — lancar semua app satu preset, masing-masing ke workspace sendiri.
-# Format: preset|label|ws|nama|perintah   (limit 4 medan lama masih diterima)
-# Guna: workspace-launch F1 [--dry-run]
+# workspace-launch — launch every app of one preset, each into its own workspace.
+# Format: preset|label|ws|name|command   (legacy 4-field rows still accepted)
+# Usage: workspace-launch F1 [--dry-run]
 set -u
 
-preset="${1:?guna: workspace-launch F1|F2|F3 [--dry-run]}"
+preset="${1:?usage: workspace-launch F1|F2|F3 [--dry-run]}"
 dry=0
 [ "${2:-}" = "--dry-run" ] && dry=1
 
 conf="${KIMRITY_WORKSPACES:-$HOME/.config/kimrity/workspaces.conf}"
 
-# Hyprland mengeksport ini untuk keybind; sesi SSH tidak. Cari sendiri jika tiada.
+# Hyprland exports this for keybinds; SSH sessions do not. Look it up when missing.
 if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
     sig=$(ls -1 "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr" 2>/dev/null | head -1)
     [ -n "$sig" ] && export HYPRLAND_INSTANCE_SIGNATURE="$sig"
 fi
-[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] || { echo "Hyprland tidak dikesan" >&2; exit 1; }
-[ -r "$conf" ] || { echo "tiada fail: $conf" >&2; exit 1; }
+[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] || { echo "Hyprland not detected" >&2; exit 1; }
+[ -r "$conf" ] || { echo "missing file: $conf" >&2; exit 1; }
 
 lines=$(grep "^${preset}|" "$conf" 2>/dev/null) || true
-[ -n "$lines" ] || { echo "preset ${preset} tiada dalam $conf" >&2; exit 1; }
+[ -n "$lines" ] || { echo "preset ${preset} missing in $conf" >&2; exit 1; }
 
 printf '%s\n' "$lines" | while IFS='|' read -r p label ws tool args; do
-    # baris lama: medan ke-4 = perintah penuh (cth "kitty -e btop")
+    # legacy row: field 4 = full command (e.g. "kitty -e btop")
     if [ -z "${args:-}" ] && [ -n "${tool:-}" ]; then
         case "$tool" in
             *" "*) args=${tool#* }; tool=${tool%% *} ;;
         esac
     fi
-    # baris lama: link sahaja → buka dengan pelayar
+    # legacy row: bare link -> open with the browser
     case "$tool" in
         http://*|https://*) args=$tool; tool=firefox ;;
     esac
     [ -n "$tool" ] || continue
     if ! command -v "$tool" >/dev/null 2>&1; then
-        echo "tool tiada dalam sistem: $tool" >&2
+        echo "tool not installed: $tool" >&2
         continue
     fi
     cmd="$tool${args:+ $args}"
@@ -42,7 +42,7 @@ printf '%s\n' "$lines" | while IFS='|' read -r p label ws tool args; do
         printf '%s %-10s [tab %s] %s\n' "$p" "$tool" "$ws" "$cmd"
     else
         hyprctl dispatch exec "[workspace $ws] env DISPLAY=${DISPLAY:-:0} _JAVA_AWT_WM_NONREPARENTING=1 $cmd" >/dev/null 2>&1 || \
-            echo "gagal lancar: $cmd" >&2
+            echo "launch failed: $cmd" >&2
         sleep 0.2
     fi
 done

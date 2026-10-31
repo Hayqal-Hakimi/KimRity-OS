@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # KimRity ISO profile — Arch + Hyprland security workstation
-# Berdasarkan struktur releng archiso 91.
+# Based on the releng archiso 91 structure.
 # shellcheck disable=SC2034
 
 iso_name="kimrity"
@@ -22,4 +22,5 @@ file_permissions=(
   ["/root/install.sh"]="0:0:755"
   ["/root/gate/gate.py"]="0:0:755"
   ["/root/tools/setup-blackarch.sh"]="0:0:755"
+  ["/usr/local/bin/kimscan"]="0:0:755"
 )

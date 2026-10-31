@@ -1,6 +1,6 @@
-## Identiti, kebenaran & kunci SSH — auditd
-## Dipasang ke /etc/audit/rules.d/10-identity.rules
-## Uji: auditctl -l  ·  ausearch -k identity
+## Identity, privilege & SSH keys — auditd
+## Installed to /etc/audit/rules.d/10-identity.rules
+## Test: auditctl -l  ·  ausearch -k identity
 
 -w /etc/passwd            -p wa -k identity
 -w /etc/shadow            -p wa -k identity
@@ -15,6 +15,6 @@
 -w /etc/ssh/sshd_config   -p wa -k ssh_config
 -w /etc/ssh/sshd_config.d/ -p wa -k ssh_config
 
-## setuid/setgid oleh user biasa (bukan root) — penunjuk eskalasi
+## setuid/setgid by regular users (not root) — escalation indicator
 -a always,exit -F arch=b64 -S setuid -S setgid -F auid>=1000 -F auid!=-1 -k privilege_escalation
 -a always,exit -F arch=b32 -S setuid -S setgid -F auid>=1000 -F auid!=-1 -k privilege_escalation

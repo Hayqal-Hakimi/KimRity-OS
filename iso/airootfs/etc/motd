@@ -3,14 +3,18 @@
   │  KimRity — Arch + Hyprland security workstation     │
   └─────────────────────────────────────────────────────┘
 
-  Pasang ke disk (AMARAN: disk itu akan dipadam):
+  Install to disk (WARNING: the disk will be wiped):
 
       bash /root/install.sh --disk /dev/vda --efi
 
-  Kandungan /root:
-      install.sh     pemasang (9 langkah, ada guard)
+  Contents of /root:
+      install.sh     installer (10 steps, with guards)
       dotfiles/      Hyprland, kitty, waybar, bash_profile
       hardening/     auditd rules, sysctl, sshd
-      lab/           artifak #1 (rule SSH brute-force + laporan + bukti)
+      tools/         BlackArch arsenal lists + repo setup
+      gate/          Security Gate CLI (scanner configs)
+      lab/           artifact #1 (SSH brute-force rule + report + evidence)
 
-  Selepas pasang: tetapkan password sendiri, kemudian reboot.
+  Installed by install.sh into /usr/local/bin: kimrity-gate, kimscan.
+
+  After installing: set your own passwords, then reboot.

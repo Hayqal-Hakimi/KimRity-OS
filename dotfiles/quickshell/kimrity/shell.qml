@@ -1,6 +1,6 @@
 // ~/.config/quickshell/kimrity/shell.qml
-// Menu KimRity v4: popup 900x560 — sidebar, 3 kluster workspace, app 2 lajur,
-// recent files + notes. Flat, tiada hiasan.
+// KimRity menu v4: popup 900x560 — sidebar, 3 workspace clusters, apps in 2
+// columns, recent files + notes. Flat, no decoration.
 import QtQuick
 import QtQuick.Controls
 import Quickshell
@@ -11,13 +11,13 @@ ShellRoot {
     id: root
 
     property bool isOpen: false
-    property int catIndex: -1      // -1 = semua
+    property int catIndex: -1      // -1 = all
     property int appIndex: 0
     property int wsIndex: 0
     property string filter: ""
 
-    // Kluster workspace — dibina daripada conf pengguna (kimrity-ws) dan
-    // ikon sebenar (kimrity-icons). Tiada tool/glyph hardcoded di sini.
+    // Workspace clusters — built from the user's conf (kimrity-ws) and real
+    // icons (kimrity-icons). No hardcoded tool/glyph here.
     property var clusters: []
     property var iconMap: ({})
     property string wsText: ""
@@ -32,7 +32,7 @@ ShellRoot {
     }
     Component.onCompleted: { root.refreshClusters(); root.refreshNotes(); root.loadApps() }
 
-    // Aplikasi sebenar daripada kimrity-apps:
+    // Real applications from kimrity-apps:
     //   name <TAB> iconpath <TAB> cmd <TAB> cat <TAB> id
     property var appData: []
     property bool appsLoaded: false
@@ -49,7 +49,7 @@ ShellRoot {
         { n: "shell.qml",              p: "~/.config/quickshell/kimrity · 19:57" }
     ]
 
-    // ---------------- seting preset ----------------
+    // ---------------- preset settings ----------------
     property bool setOpen: false
     property string editPreset: ""
     property var editRows: []
@@ -59,8 +59,8 @@ ShellRoot {
     readonly property string homeDir: Quickshell.env("HOME") || "/home/hayqal"
     readonly property string confPath: homeDir + "/.config/kimrity/workspaces.conf"
 
-    // ---------------- nota ----------------
-    // Nota disimpan dalam JSON dan dibaca semula melalui Process + StdioCollector.
+    // ---------------- notes ----------------
+    // Notes are stored in JSON and re-read via Process + StdioCollector.
     property var notes: []
     property bool notesDone: false
     property int noteIndex: -1
@@ -70,8 +70,8 @@ ShellRoot {
     readonly property string notesPath: homeDir + "/.config/kimrity/notes.json"
 
     // ---------------- gate ----------------
-    // Halaman Gate: pilih sasaran, jalankan kimrity-gate (NDJSON), baca
-    // gate.json sebenar. Tiada analisis AI dalam versi ini.
+    // Gate page: pick a target, run kimrity-gate (NDJSON), read the real
+    // gate.json. No AI analysis in this version.
     property bool gatePage: false
     property string gateKind: "repo"
     property string gateTarget: ""
@@ -95,7 +95,7 @@ ShellRoot {
         && !root.gateRunning
         && (root.gateKind === "repo" || root.gateAuthorized)
 
-    // Logik JSON inline: jq jika ada, python3 jika tiada.
+    // Inline JSON logic: jq if available, python3 otherwise.
     readonly property string notesScript: `
 set -u
 f="$1"; op="$2"; id="$3"; shift 3 || true; text="$*"
@@ -147,7 +147,7 @@ PY
 fi
 `
 
-    // Skrip cetak fail penuh ke stdout; UI baca dari situ (tiada cache).
+    // Scripts print the full file to stdout; the UI reads from there (no cache).
     Process {
         id: wsRunner
         stdout: StdioCollector {
@@ -162,8 +162,8 @@ fi
         }
     }
 
-    // Conf penuh untuk kluster (bukan editor). kimrity-ws perlukan argumen
-    // preset walaupun untuk `list`; `list` mengabaikannya dan cetak semua baris.
+    // Full conf for clusters (not the editor). kimrity-ws needs the preset
+    // argument even for `list`; `list` ignores it and prints all rows.
     Process {
         id: wsListProc
         stdout: StdioCollector {
@@ -173,7 +173,7 @@ fi
         onExited: if (!root.wsDone) root.wsListReady("")
     }
 
-    // Peta tool -> laluan ikon sebenar.
+    // Map tool -> real icon path.
     Process {
         id: iconsProc
         stdout: StdioCollector {
@@ -183,7 +183,7 @@ fi
         onExited: if (!root.iconsDone) root.iconsReady("")
     }
 
-    // Senarai tool yang benar-benar ada (cache 1 hari) untuk dropdown.
+    // List of tools that actually exist (1-day cache) for the dropdown.
     Process {
         id: toolsProc
         stdout: StdioCollector {
@@ -195,8 +195,8 @@ fi
         }
     }
 
-    // Senarai aplikasi sebenar (sekali sahaja). Skrip mungkin belum wujud;
-    // jika tiada output, senarai kekal kosong tanpa ralat QML.
+    // Real app list (once only). The script may not exist yet; if there is no
+    // output, the list stays empty without QML errors.
     Process {
         id: appsProc
         stdout: StdioCollector {
@@ -205,7 +205,7 @@ fi
         }
     }
 
-    // Semua operasi nota cetak semula JSON penuh; sama seperti kimrity-ws.
+    // All note operations re-print the full JSON; same pattern as kimrity-ws.
     Process {
         id: notesProc
         stdout: StdioCollector {
@@ -215,9 +215,9 @@ fi
         onExited: if (!root.notesDone) root.notesReady("[]")
     }
 
-    // Gate: SplitParser membaca NDJSON baris demi baris semasa proses hidup
-    // supaya status scanner boleh dikemas kini. gate.json dibaca berasingan
-    // melalui Process + StdioCollector (tiada cache FileView).
+    // Gate: SplitParser reads the NDJSON line by line while the process is
+    // alive so scanner statuses can be updated. gate.json is read separately
+    // via Process + StdioCollector (no FileView cache).
     Process {
         id: gateRunProc
         stdout: SplitParser {
@@ -246,8 +246,8 @@ fi
         onExited: if (root.gateHistoryLoading) root.gateHistoryReady("")
     }
 
-    // Beri peluang baris NDJSON terakhir diproses sebelum menganggap proses
-    // habis tanpa keputusan.
+    // Give the last NDJSON line a chance to be processed before assuming the
+    // process ended without a result.
     Timer {
         id: gateExitTimer
         interval: 150
@@ -256,7 +256,7 @@ fi
             if (!root.gateRunning) return
             root.gateRunning = false
             if (!root.gateDone && root.gateError === "")
-                root.gateError = "Scan berhenti (exit " + root.gateExitCode + ")"
+                root.gateError = "Scan stopped (exit " + root.gateExitCode + ")"
         }
     }
 
@@ -269,7 +269,7 @@ fi
     function loadApps() {
         if (root.appsLoaded) return
         root.appsLoaded = true
-        // Skrip mungkin belum wujud: jangan bunyi bising, pulangkan output kosong.
+        // The script may not exist yet: stay quiet and return empty output.
         appsProc.command = ["bash", "-lc",
             "f=\"$1\"; [ -x \"$f\" ] && exec \"$f\" || exit 0",
             "kimrity-apps", root.homeDir + "/.local/bin/kimrity-apps"]
@@ -297,7 +297,7 @@ fi
         root.appData = out
     }
 
-    // ---------------- nota ----------------
+    // ---------------- notes ----------------
     function refreshNotes() {
         root.notesCall("read", "", "")
     }
@@ -390,16 +390,14 @@ fi
 
     function gateVerdictColor(v) {
         const s = String(v || "")
-        if (s === "LULUS") return "#3fbf8f"
-        if (s === "LULUS BERSYARAT" || s === "BERSYARAT") return "#e0a34a"
-        if (s === "TIDAK LULUS") return "#e8443a"
+        if (s === "PASS") return "#3fbf8f"
+        if (s === "CONDITIONAL") return "#e0a34a"
+        if (s === "FAIL") return "#e8443a"
         return "#5b6784"
     }
 
     function gateVerdictLabel(v) {
-        const s = String(v || "")
-        if (s === "LULUS BERSYARAT") return "BERSYARAT"
-        return s
+        return String(v || "")
     }
 
     function gateLocation(f) {
@@ -440,7 +438,7 @@ fi
             return
         }
         if (o.phase === "error") {
-            root.gateError = String(o.message || "ralat gate")
+            root.gateError = String(o.message || "gate error")
             root.gateRunning = false
             return
         }
@@ -495,7 +493,7 @@ fi
         let j = null
         try { j = JSON.parse((t || "").trim()) } catch (e) { j = null }
         if (!j || typeof j !== "object") {
-            root.gateError = path ? ("gate.json tidak dapat dibaca: " + path) : "gate.json tidak dapat dibaca"
+            root.gateError = path ? ("gate.json could not be read: " + path) : "gate.json could not be read"
             if (!root.gateDone) root.gateRunning = false
             return
         }
@@ -566,8 +564,8 @@ fi
         wsRunner.running = true
     }
 
-    // Muat semula kluster + ikon. Dipanggil semasa buka menu, selepas edit,
-    // dan selepas apply supaya panel tidak tunjuk data basi.
+    // Reload clusters + icons. Called when the menu opens, after edits, and
+    // after apply so the panel never shows stale data.
     function refreshClusters() {
         root.wsText = ""
         root.iconMap = ({})
@@ -622,7 +620,7 @@ fi
             })
         }
 
-        // Preset sentiasa tiga, dalam tertib ini; baris diisih ikut workspace.
+        // The presets are always these three, in this order; rows sort by workspace.
         const keys = ["F1", "F2", "F3"]
         const out = []
         for (let i = 0; i < keys.length; i++) {
@@ -647,7 +645,7 @@ fi
         root.clusters = out
     }
 
-    // Maksimum 4 tile: 3 tool + satu tile "+N" jika lebih.
+    // Maximum 4 tiles: 3 tools + one "+N" tile when there are more.
     function tilesFor(cluster) {
         const t = (cluster && cluster.tools) ? cluster.tools : []
         if (t.length <= 4) return t
@@ -686,10 +684,10 @@ fi
         function openMenu(): void { root.isOpen = true }
         function closeMenu(): void { root.isOpen = false }
         function openSettings(key: string): void { root.isOpen = true; root.openEditor(key) }
-        function wsApply(key: string, baris: string, ws: string): void {
+        function wsApply(key: string, rowNo: string, ws: string): void {
             root.isOpen = true
             if (root.editPreset !== key) root.openEditor(key)
-            root.wsCall(["set", key, baris, ws])
+            root.wsCall(["set", key, rowNo, ws])
         }
     }
 
@@ -697,8 +695,9 @@ fi
 
     function run(cmd) {
         if (!cmd) return
-        // Panel (qs) tiada DISPLAY dalam env → app Java/Swing (ghidra, burp) gagal senyap.
-        // _JAVA_AWT_WM_NONREPARENTING: elak tetingkap Swing putih kosong di bawah XWayland.
+        // The panel (qs) has no DISPLAY in its env -> Java/Swing apps (ghidra, burp)
+        // fail silently. _JAVA_AWT_WM_NONREPARENTING: avoids blank white Swing
+        // windows under XWayland.
         runner.command = ["bash", "-lc",
             "export DISPLAY=\"${DISPLAY:-:0}\"; export _JAVA_AWT_WM_NONREPARENTING=1; " + cmd]
         runner.running = true
@@ -712,7 +711,7 @@ fi
     }
 
     function presetKey(key) {
-        // Editor terbuka: tukar preset di tempat, jangan lancar workspace.
+        // Editor open: switch the preset in place, do not launch a workspace.
         if (root.editPreset !== "") {
             root.openEditor(key)
             return
@@ -739,7 +738,7 @@ fi
         }
     }
 
-    // ---------------- tetingkap ----------------
+    // ---------------- window ----------------
     LazyLoader {
         active: root.isOpen
 
@@ -766,7 +765,7 @@ fi
                 border.color: "#1a2336"
                 border.width: 1
 
-                // ================= editor seting preset =================
+                // ================= preset settings editor =================
                 Rectangle {
                     id: editor
                     visible: root.editPreset !== ""
@@ -776,7 +775,7 @@ fi
                     height: parent.height - 16
                     radius: 11; color: "#101728"
 
-                    // telan klik kosong supaya tidak tembus ke dashboard di belakang
+                    // Swallow empty clicks so they do not fall through to the dashboard behind.
                     MouseArea { anchors.fill: parent; onClicked: {} }
 
                     Column {
@@ -788,7 +787,7 @@ fi
                             width: parent.width
                             spacing: 12
                             Text {
-                                text: "Seting · " + root.editPreset + " " + (root.clusters[root.wsIndex] ? root.clusters[root.wsIndex].label : "")
+                                text: "Settings · " + root.editPreset + " " + (root.clusters[root.wsIndex] ? root.clusters[root.wsIndex].label : "")
                                 color: "#e3ebff"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13
                                 anchors.verticalCenter: parent.verticalCenter
                             }
@@ -799,7 +798,7 @@ fi
                                 anchors.verticalCenter: parent.verticalCenter
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "Semua → Tab 1"; color: "#4fd1c5"
+                                    text: "All → Tab 1"; color: "#4fd1c5"
                                     font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                 }
                                 MouseArea {
@@ -810,7 +809,7 @@ fi
                         }
 
                         Text {
-                            text: "Nombor = workspace. Sama nombor = tab sama. Klik untuk tukar."
+                            text: "Number = workspace. Same number = same tab. Click to change."
                             color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                         }
 
@@ -827,7 +826,7 @@ fi
                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                             }
                             Text {
-                                text: "ARAHAN / LINK"; color: "#5f6c8c"
+                                text: "CMD / LINK"; color: "#5f6c8c"
                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                             }
                         }
@@ -943,7 +942,7 @@ fi
                                         anchors.verticalCenter: parent.verticalCenter
                                         Text {
                                             anchors.centerIn: parent
-                                            text: "Buang"; color: "#e08b95"
+                                            text: "Remove"; color: "#e08b95"
                                             font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                         }
                                         MouseArea {
@@ -999,7 +998,7 @@ fi
                                         }
                                         Text {
                                             visible: parent.text.length === 0
-                                            text: "tool — cth: firefox"
+                                            text: "tool — e.g.: firefox"
                                             color: "#6c7a9c"; font: parent.font
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
@@ -1027,7 +1026,7 @@ fi
                                         Keys.onPressed: (e) => root.handleFieldKey(e)
                                         Text {
                                             visible: parent.text.length === 0
-                                            text: "arahan / link — cth: https://youtube.com"
+                                            text: "cmd / link — e.g.: https://youtube.com"
                                             color: "#6c7a9c"; font: parent.font
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
@@ -1061,7 +1060,7 @@ fi
 
                                     Text {
                                         anchors.centerIn: parent
-                                        text: "＋ Tambah"; color: "#06221f"
+                                        text: "＋ Add"; color: "#06221f"
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
                                         font.bold: true
                                     }
@@ -1070,7 +1069,7 @@ fi
                                         onClicked: {
                                             let t = addTool.text.trim()
                                             let a = addArgs.text.trim()
-                                            // pisahkan jika link tersalah taip dalam kotak tool
+                                            // split off a link accidentally typed into the tool box
                                             const i = t.indexOf("http")
                                             if (i > 0) {
                                                 a = t.slice(i) + (a.length > 0 ? " " + a : "")
@@ -1090,7 +1089,7 @@ fi
                                 }
                             }
 
-                            // dropdown tool yang memang terpasang
+                            // dropdown of tools that are actually installed
                             Rectangle {
                                 id: toolDrop
                                 visible: addTool.activeFocus && root.toolHits.length > 0
@@ -1156,7 +1155,7 @@ fi
 
                     readonly property int scannerH: (root.gateRunning || root.gateScanners.length > 0) ? 94 : 0
 
-                    // telan klik kosong supaya tidak tembus ke dashboard di belakang
+                    // Swallow empty clicks so they do not fall through to the dashboard behind.
                     MouseArea { anchors.fill: parent; onClicked: {} }
 
                     Column {
@@ -1175,17 +1174,17 @@ fi
                             Text {
                                 anchors.left: gateTitle.right; anchors.leftMargin: 10
                                 anchors.verticalCenter: gateTitle.verticalCenter
-                                text: "Security Gate · pilih sasaran, jalankan scanner, baca keputusan CLI"
+                                text: "Security Gate · pick a target, run the scanners, read the CLI verdict"
                                 color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                             }
                             Text {
                                 anchors.right: parent.right; anchors.verticalCenter: gateTitle.verticalCenter
-                                text: root.gateLoadedJson.length > 0 ? "gate.json" : "belum ada imbasan"
+                                text: root.gateLoadedJson.length > 0 ? "gate.json" : "no scan yet"
                                 color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                             }
                         }
 
-                        // ----- sasaran + jenis + kebenaran + run -----
+                        // ----- target + kind + authorization + run -----
                         Item {
                             width: parent.width; height: 34
 
@@ -1200,7 +1199,7 @@ fi
                                 Text {
                                     visible: gateTargetInput.text.length === 0
                                     x: 10; anchors.verticalCenter: parent.verticalCenter
-                                    text: "Sasaran — folder/repo, URL, atau host"
+                                    text: "Target — folder/repo, URL, or host"
                                     color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                 }
                                 TextInput {
@@ -1280,7 +1279,7 @@ fi
                                         }
                                     }
                                     Text {
-                                        text: "Saya ada kebenaran"
+                                        text: "I have authorization"
                                         color: (root.gateKind === "repo")
                                             ? "#5b6784"
                                             : (root.gateAuthorized ? "#c9d4ec" : "#c08a62")
@@ -1304,7 +1303,7 @@ fi
                                 opacity: root.gateCanRun ? 1 : 0.55
                                 Text {
                                     anchors.centerIn: parent
-                                    text: root.gateRunning ? "Mengimbas…" : "Run"
+                                    text: root.gateRunning ? "Scanning…" : "Run"
                                     color: root.gateRunning ? "#e0a34a" : (root.gateCanRun ? "#4fd1c5" : "#5b6784")
                                     font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                     font.bold: true
@@ -1316,7 +1315,7 @@ fi
                             }
                         }
 
-                        // ----- keputusan + scanner + dapatan | sejarah + AI -----
+                        // ----- verdict + scanners + findings | history + AI -----
                         Row {
                             width: parent.width
                             height: parent.height - 22 - 34 - 20
@@ -1342,8 +1341,8 @@ fi
                                             : (root.gateVerdict !== "" ? root.gateVerdictColor(root.gateVerdict) : "#243149"))
                                         Text {
                                             anchors.centerIn: parent
-                                            text: root.gateRunning ? "MENGIMBAS…"
-                                                : (root.gateError !== "" ? "RALAT"
+                                            text: root.gateRunning ? "SCANNING…"
+                                                : (root.gateError !== "" ? "ERROR"
                                                 : (root.gateVerdict !== "" ? root.gateVerdictLabel(root.gateVerdict) : "—"))
                                             color: root.gateRunning ? "#e0a34a"
                                                 : (root.gateError !== "" ? "#e8443a"
@@ -1400,7 +1399,7 @@ fi
                                         width: parent.width - 196
                                         text: root.gateError !== "" ? root.gateError
                                             : (root.gateReason !== "" ? root.gateReason
-                                            : (root.gateRunning ? "Scanner sedang berjalan…" : "Belum ada imbasan."))
+                                            : (root.gateRunning ? "Scanner running…" : "No scan yet."))
                                         color: root.gateError !== "" ? "#e08b95" : "#7d8aa8"
                                         elide: Text.ElideRight
                                         maximumLineCount: 1
@@ -1479,24 +1478,24 @@ fi
                                     Text {
                                         visible: root.gateScanners.length === 0
                                         x: 12; y: 34
-                                        text: root.gateRunning ? "Menyediakan…" : "Tiada status scanner."
+                                        text: root.gateRunning ? "Preparing…" : "No scanner status."
                                         color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                                     }
                                 }
 
-                                // jadual dapatan
+                                // findings table
                                 Rectangle {
                                     width: parent.width
                                     height: parent.height - 66 - 8 - (gatePageBox.scannerH > 0 ? gatePageBox.scannerH + 8 : 0)
                                     radius: 10; color: "#101728"
 
                                     Text {
-                                        x: 12; y: 9; text: "Dapatan"; color: "#b9c6e2"
+                                        x: 12; y: 9; text: "Findings"; color: "#b9c6e2"
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                     }
                                     Text {
                                         anchors.right: parent.right; anchors.rightMargin: 12; y: 10
-                                        text: root.gateFindings.length + " isu"
+                                        text: root.gateFindings.length + " issues"
                                         color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                     }
 
@@ -1511,28 +1510,28 @@ fi
                                             width: parent.width; height: 16
                                             spacing: 4
                                             Text {
-                                                width: 54; text: "TAHAP"; color: "#5f6c8c"
+                                                width: 54; text: "SEV"; color: "#5f6c8c"
                                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                             }
                                             Text {
-                                                width: 64; text: "ALAT"; color: "#5f6c8c"
+                                                width: 64; text: "TOOL"; color: "#5f6c8c"
                                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                             }
                                             Text {
                                                 width: parent.width - 54 - 64 - 110 - 12
-                                                text: "ISU"; color: "#5f6c8c"
+                                                text: "ISSUE"; color: "#5f6c8c"
                                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                             }
                                             Text {
-                                                width: 110; text: "LOKASI"; color: "#5f6c8c"
+                                                width: 110; text: "LOCATION"; color: "#5f6c8c"
                                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                             }
                                         }
 
                                         Text {
                                             visible: root.gateFindings.length === 0
-                                            text: root.gateRunning ? "Menunggu keputusan…"
-                                                : (root.gateDone ? "Tiada dapatan dilaporkan." : "Belum ada imbasan.")
+                                            text: root.gateRunning ? "Waiting for results…"
+                                                : (root.gateDone ? "No findings reported." : "No scan yet.")
                                             color: "#5b6784"
                                             font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                                         }
@@ -1587,7 +1586,7 @@ fi
 
                                         Text {
                                             visible: root.gateFindings.length > 12
-                                            text: "+" + (root.gateFindings.length - 12) + " lagi"
+                                            text: "+" + (root.gateFindings.length - 12) + " more"
                                             color: "#4fd1c5"
                                             font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                         }
@@ -1600,18 +1599,18 @@ fi
                                 height: parent.height
                                 spacing: 8
 
-                                // sejarah 5 imbasan terakhir
+                                // history of the last 5 scans
                                 Rectangle {
                                     width: parent.width; height: 210
                                     radius: 10; color: "#101728"
 
                                     Text {
-                                        x: 12; y: 9; text: "Sejarah"; color: "#b9c6e2"
+                                        x: 12; y: 9; text: "History"; color: "#b9c6e2"
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                     }
                                     Text {
                                         anchors.right: parent.right; anchors.rightMargin: 12; y: 10
-                                        text: "5 terkini"
+                                        text: "latest 5"
                                         color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                     }
 
@@ -1623,7 +1622,7 @@ fi
 
                                         Text {
                                             visible: root.gateHistory.length === 0
-                                            text: root.gateHistoryLoading ? "Memuatkan…" : "Tiada imbasan lagi."
+                                            text: root.gateHistoryLoading ? "Loading…" : "No scans yet."
                                             color: "#5b6784"
                                             font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                                         }
@@ -1657,7 +1656,7 @@ fi
                                     }
                                 }
 
-                                // placeholder AI — sengaja tiada logik
+                                // placeholder AI — intentionally no logic
                                 Rectangle {
                                     width: parent.width
                                     height: parent.height - 210 - 8
@@ -1668,14 +1667,14 @@ fi
 
                                     Text {
                                         x: 12; y: 10
-                                        text: "Analisis AI — belum tersedia"
+                                        text: "AI analysis — not available yet"
                                         color: "#5b6784"
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                     }
                                     Text {
                                         x: 12; y: 32
                                         width: parent.width - 24
-                                        text: "Versi Gate ini hanya memaparkan keputusan peraturan CLI. Tiada model AI digunakan."
+                                        text: "This Gate version only shows the CLI rule engine verdict. No AI model is used."
                                         color: "#46536f"
                                         wrapMode: Text.WordWrap
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
@@ -1752,7 +1751,7 @@ fi
                                 }
                             }
 
-                            // --- dropdown: Seting preset ---
+                            // --- dropdown: preset settings ---
                             Rectangle {
                                 width: parent.width; height: 26; radius: 6; color: "transparent"
                                 Row {
@@ -1760,7 +1759,7 @@ fi
                                     anchors.left: parent.left; anchors.leftMargin: 9
                                     spacing: 8
                                     Text { text: "\uf013"; color: "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
-                                    Text { text: "Seting preset"; color: "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
+                                    Text { text: "Preset settings"; color: "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
                                     Text {
                                         text: root.setOpen ? "\uf077" : "\uf078"
                                         color: "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
@@ -1791,7 +1790,7 @@ fi
                                 }
                             }
 
-                            // tolak baki ke bawah
+                            // push the rest to the bottom
                             Item { width: 1; height: Math.max(0, parent.height - 30 - 4 - 28 - 26 - 26 - 26 - 4 - (root.setOpen ? 100 : 0)) }
 
                             Rectangle {
@@ -1836,7 +1835,7 @@ fi
                         }
                     }
 
-                    // ================= lajur utama =================
+                    // ================= main column =================
                     Column {
                         width: parent.width - 176
                         height: parent.height
@@ -1853,7 +1852,7 @@ fi
                             }
                             Text {
                                 anchors.right: parent.right; anchors.rightMargin: 12; y: 11
-                                text: "F1–F3: lancar semua app ke workspace 1–3"
+                                text: "F1–F3: launch every app into workspace 1–3"
                                 color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                             }
 
@@ -1882,7 +1881,7 @@ fi
                                                 border.color: "#4fd1c5"
                                                 scale: root.wsIndex === index ? 1.06 : 1.0
 
-                                                // Satu baris -> satu tile besar; jika tidak 2x2.
+                                                // One row -> one big tile; otherwise 2x2.
                                                 Item {
                                                     anchors.centerIn: parent
                                                     width: cluster.count === 1 ? 64 : 70
@@ -1925,7 +1924,7 @@ fi
                                                                         asynchronous: true
                                                                     }
 
-                                                                    // Fallback monogram — hanya bila tiada ikon.
+                                                                    // Monogram fallback — only when there is no icon.
                                                                     Text {
                                                                         visible: !root.hasIcon(modelData)
                                                                         text: modelData.more ? modelData.tool : root.monogram(modelData.tool)
@@ -1939,8 +1938,8 @@ fi
                                                                         font.bold: true
                                                                     }
 
-                                                                    // Nama tool di dalam tile (2x2): ruang 96px
-                                                                    // tidak cukup untuk tile 34px + kapsyen luar.
+                                                                    // Tool name inside the tile (2x2): the 96px space
+                                                                    // is not enough for a 34px tile + an outer caption.
                                                                     Text {
                                                                         visible: cluster.count > 1 && !modelData.more
                                                                         anchors.horizontalCenter: parent.horizontalCenter
@@ -1957,7 +1956,7 @@ fi
                                                                     }
                                                                 }
 
-                                                                // Satu baris: nama di bawah tile besar.
+                                                                // One row: name under the big tile.
                                                                 Text {
                                                                     visible: cluster.count === 1
                                                                     width: parent.width
@@ -2013,7 +2012,7 @@ fi
                             }
                         }
 
-                        // ----- apps 2 lajur -----
+                        // ----- apps in 2 columns -----
                         Rectangle {
                             width: parent.width; height: 232
                             radius: 11; color: "#101728"
@@ -2021,7 +2020,7 @@ fi
                             Text { x: 12; y: 10; text: "Apps"; color: "#b9c6e2"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
                             Text {
                                 anchors.right: parent.right; anchors.rightMargin: 12; y: 11
-                                text: root.apps.length + " app · 2 lajur"
+                                text: root.apps.length + " apps · 2 columns"
                                 color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                             }
 
@@ -2059,7 +2058,7 @@ fi
                                                 asynchronous: true
                                             }
 
-                                            // Fallback monogram apabila iconpath ialah "--".
+                                            // Monogram fallback when the icon path is "--".
                                             Rectangle {
                                                 anchors.horizontalCenter: parent.horizontalCenter
                                                 visible: modelData.icon.length === 0
@@ -2130,7 +2129,7 @@ fi
 
                                 Text { x: 12; y: 10; text: "Notes"; color: "#b9c6e2"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
 
-                                // dropdown kecil: + Nota, + Checklist, Edit, Buang
+                                // small dropdown: + Note, + Checklist, Edit, Remove
                                 Rectangle {
                                     id: notesBtn
                                     anchors.right: parent.right; anchors.rightMargin: 12; y: 9
@@ -2166,10 +2165,10 @@ fi
                                         spacing: 1
                                         Repeater {
                                             model: [
-                                                { label: "+ Nota", act: "note" },
+                                                { label: "+ Note", act: "note" },
                                                 { label: "+ Checklist", act: "check" },
                                                 { label: "Edit", act: "edit" },
-                                                { label: "Buang", act: "del" }
+                                                { label: "Remove", act: "del" }
                                             ]
                                             delegate: Rectangle {
                                                 id: menuItem
@@ -2204,7 +2203,7 @@ fi
 
                                     Text {
                                         visible: root.notes.length === 0
-                                        text: "Tiada nota"; color: "#5b6784"
+                                        text: "No notes"; color: "#5b6784"
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                     }
 
@@ -2230,7 +2229,7 @@ fi
                                                 anchors.right: parent.right; anchors.rightMargin: 6
                                                 spacing: 6
 
-                                                // kotak semak (hanya type "check")
+                                                // check box (type "check" only)
                                                 Rectangle {
                                                     visible: modelData.type === "check"
                                                     width: 12; height: 12; radius: 3
@@ -2262,7 +2261,7 @@ fi
                                                 Text {
                                                     visible: !(root.noteEdit && root.noteIndex === index)
                                                     width: parent.width - (modelData.type === "check" ? 30 : 20)
-                                                    text: String(modelData.text || "").length > 0 ? String(modelData.text) : "(kosong)"
+                                                    text: String(modelData.text || "").length > 0 ? String(modelData.text) : "(empty)"
                                                     color: modelData.done ? "#5b6784" : "#93a0be"
                                                     elide: Text.ElideRight
                                                     maximumLineCount: 1
@@ -2295,7 +2294,7 @@ fi
                                                     }
                                                     Text {
                                                         visible: parent.text.length === 0
-                                                        text: "Nota…"; color: "#5b6784"
+                                                        text: "Note…"; color: "#5b6784"
                                                         anchors.verticalCenter: parent.verticalCenter
                                                         font: parent.font
                                                     }

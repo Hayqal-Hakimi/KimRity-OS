@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""KimRity Security Gate — v2 (repo kod · web · server).
+"""KimRity Security Gate — v2 (code repo · web · server).
 
-Satu tool yang memakai tool lain untuk menyemak sesuatu sasaran dan
-mengeluarkan keputusan LULUS / LULUS BERSYARAT / TIDAK LULUS.
+One tool that uses other tools to check a target and produce a
+PASS / CONDITIONAL / FAIL decision.
 
-Penggunaan:
-    gate.py <sasaran> [--kind repo|web|server] [--scope FAIL]
+Usage:
+    gate.py <target> [--kind repo|web|server] [--scope FILE]
              [--authorized] [--out DIR] [--fail-on critical|high|medium] [--quiet]
 
-    repo   : laluan folder/repo  → gitleaks + semgrep + trivy
-    web    : URL (http/https)    → nuclei + nikto
-    server : host / IP           → nmap (+ ssh-audit jika port 22 terbuka)
+    repo   : folder/repo path   → gitleaks + semgrep + trivy
+    web    : URL (http/https)   → nuclei + nikto
+    server : host / IP          → nmap (+ ssh-audit if port 22 is open)
 
-Imbasan aktif (web/server) WAJIB --authorized, dan jika --scope diberi,
-sasaran mesti ada dalam fail skop itu.
+Active scans (web/server) REQUIRE --authorized, and if --scope is given,
+the target must be listed in that scope file.
 
-Prinsip: model/AI tidak terlibat dalam keputusan. Verdict = peraturan kod.
+Principle: no model/AI is involved in the decision. Verdict = rule of code.
 """
 
 import argparse
@@ -33,10 +33,10 @@ from urllib.parse import urlparse
 SEV_WEIGHT = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0, "unknown": 1}
 SEV_ORDER = ["critical", "high", "medium", "low", "info", "unknown"]
 
-# Gitleaks tidak memberi severity: rahsia terdedah sentiasa high.
+# Gitleaks does not emit a severity: an exposed secret is always high.
 SEMGREP_SEV = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
 
-# Port yang lazimnya tidak sepatutnya terdedah pada antara muka rangkaian.
+# Ports that should usually not be exposed on a network interface.
 PORT_RISK = {
     21: "medium", 23: "high", 111: "low", 445: "high", 512: "high",
     513: "high", 514: "high", 1433: "high", 3306: "high", 3389: "medium",
@@ -55,19 +55,19 @@ VERSION_CMD = {
 
 
 def run(cmd, timeout=1800):
-    """Jalankan arahan; pulangkan (returncode, stdout, stderr)."""
+    """Run a command; return (returncode, stdout, stderr)."""
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
     except FileNotFoundError:
-        return 127, "", f"tool tidak dijumpai: {cmd[0]}"
+        return 127, "", f"tool not found: {cmd[0]}"
     except subprocess.TimeoutExpired:
-        return 124, "", f"tamat masa selepas {timeout}s: {' '.join(cmd[:3])}"
+        return 124, "", f"timed out after {timeout}s: {' '.join(cmd[:3])}"
 
 
 def tool_version(name):
-    """Ada binari = alat tersedia. Versi diambil secara best-effort —
-    sesetengah alat (cth ssh-audit) tiada flag --version."""
+    """Binary present = tool available. Version is best-effort —
+    some tools (e.g. ssh-audit) have no --version flag."""
     if shutil.which(name) is None:
         return None
     rc, out, err = run(VERSION_CMD[name], timeout=120)
@@ -99,13 +99,13 @@ def scan_gitleaks(repo, tmp):
     rc, _, err = run(cmd)
     data = read_json(out)
     if data is None:
-        return [], f"gitleaks gagal (rc={rc}): {err.strip()[:300]}"
+        return [], f"gitleaks failed (rc={rc}): {err.strip()[:300]}"
     out_findings = []
     for f in data if isinstance(data, list) else []:
         out_findings.append(finding(
             "gitleaks", f.get("RuleID", "?"), "high",
-            f.get("File", "?"), f.get("Description", "rahsia terdedah"),
-            "buang rahsia dari kod dan sejarah git; putar semula kunci",
+            f.get("File", "?"), f.get("Description", "exposed secret"),
+            "remove the secret from the code and git history; rotate the key",
             f.get("StartLine", 0) or 0))
     return out_findings, None
 
@@ -117,7 +117,7 @@ def scan_semgrep(repo, tmp):
     rc, _, err = run(cmd)
     data = read_json(out)
     if data is None:
-        return [], f"semgrep gagal (rc={rc}): {err.strip()[:300]}"
+        return [], f"semgrep failed (rc={rc}): {err.strip()[:300]}"
     out_findings = []
     for r in data.get("results", []):
         extra = r.get("extra", {})
@@ -127,12 +127,12 @@ def scan_semgrep(repo, tmp):
             os.path.relpath(r.get("path", "?"), repo),
             extra.get("message", "").strip(),
             (extra.get("metadata", {}) or {}).get("fix", "")
-            or "semak corak dan betulkan mengikut nasihat rule",
+            or "review the pattern and fix it per the rule guidance",
             r.get("start", {}).get("line", 0)))
     errors = data.get("errors") or []
     if not out_findings and errors:
-        return [], (f"semgrep: {len(errors)} ralat, tiada hasil "
-                    f"(cth: {errors[0].get('message', '')[:200]})")
+        return [], (f"semgrep: {len(errors)} errors, no results "
+                    f"(e.g. {errors[0].get('message', '')[:200]})")
     return out_findings, None
 
 
@@ -144,7 +144,7 @@ def scan_trivy(repo, tmp):
     rc, _, err = run(cmd)
     data = read_json(out)
     if data is None:
-        return [], f"trivy gagal (rc={rc}): {err.strip()[:300]}"
+        return [], f"trivy failed (rc={rc}): {err.strip()[:300]}"
     out_findings = []
     for res in data.get("Results", []) or []:
         tgt = res.get("Target", "?")
@@ -153,13 +153,13 @@ def scan_trivy(repo, tmp):
                 "trivy", v.get("VulnerabilityID", "?"),
                 str(v.get("Severity", "unknown")).lower(), tgt,
                 f"{v.get('PkgName', '?')} {v.get('InstalledVersion', '?')}: {v.get('Title', 'CVE')}",
-                f"naik taraf ke {v.get('FixedVersion')}" if v.get("FixedVersion")
-                else "tiada versi pembaikan dilaporkan"))
+                f"upgrade to {v.get('FixedVersion')}" if v.get("FixedVersion")
+                else "no fixed version reported"))
         for s in res.get("Secrets", []) or []:
             out_findings.append(finding(
                 "trivy", s.get("RuleID", "secret"), "high", tgt,
-                s.get("Title", "rahsia terdedah"),
-                "buang dan putar semula kunci", s.get("StartLine", 0) or 0))
+                s.get("Title", "exposed secret"),
+                "remove and rotate the key", s.get("StartLine", 0) or 0))
         for m in res.get("Misconfigurations", []) or []:
             if str(m.get("Status", "")).upper() == "PASS":
                 continue
@@ -180,7 +180,7 @@ def scan_nuclei(url, tmp):
            "-timeout", "10", "-retries", "1"]
     rc, _, err = run(cmd, timeout=1800)
     if not os.path.exists(out):
-        return [], f"nuclei gagal (rc={rc}): {err.strip()[:300]}"
+        return [], f"nuclei failed (rc={rc}): {err.strip()[:300]}"
     out_findings = []
     with open(out, encoding="utf-8") as fh:
         for line in fh:
@@ -197,7 +197,7 @@ def scan_nuclei(url, tmp):
                 str(info.get("severity", "unknown")).lower(),
                 d.get("matched-at") or d.get("host") or url,
                 info.get("name") or "",
-                info.get("remediation") or "semak template dan betulkan"))
+                info.get("remediation") or "check the template and remediate"))
     return out_findings, None
 
 
@@ -208,7 +208,7 @@ def scan_nikto(url, tmp):
     rc, _, err = run(cmd, timeout=900)
     data = read_json(out)
     if data is None:
-        return [], f"nikto gagal (rc={rc}): {err.strip()[:200]}"
+        return [], f"nikto failed (rc={rc}): {err.strip()[:200]}"
     out_findings = []
     hosts = data if isinstance(data, list) else [data]
     for h in hosts:
@@ -218,7 +218,7 @@ def scan_nikto(url, tmp):
             out_findings.append(finding(
                 "nikto", str(v.get("id", "?")), sev,
                 (h.get("host") or url) + (v.get("url") or ""), msg,
-                "semak penemuan nikto dan betulkan konfigurasi pelayan"))
+                "review the nikto findings and fix the server configuration"))
     return out_findings, None
 
 
@@ -231,11 +231,11 @@ def scan_nmap(host, tmp):
            "-oX", out, host]
     rc, _, err = run(cmd, timeout=1800)
     if not os.path.exists(out):
-        return [], f"nmap gagal (rc={rc}): {err.strip()[:300]}", set()
+        return [], f"nmap failed (rc={rc}): {err.strip()[:300]}", set()
     try:
         root = ET.parse(out).getroot()
     except ET.ParseError as e:
-        return [], f"nmap XML tak sah: {e}", set()
+        return [], f"invalid nmap XML: {e}", set()
 
     out_findings, open_ports = [], set()
     for h in root.findall("host"):
@@ -253,8 +253,8 @@ def scan_nmap(host, tmp):
             sev = PORT_RISK.get(num)
             if sev:
                 out_findings.append(finding(
-                    "nmap", f"port-{num}", sev, host, f"Port {label} terdedah",
-                    "tutup port atau hadkan kepada rangkaian yang perlu"))
+                    "nmap", f"port-{num}", sev, host, f"Port {label} exposed",
+                    "close the port or restrict it to the networks that need it"))
             for sc in port.findall("script"):
                 sid = sc.get("id", "")
                 text = (sc.get("output") or "").strip()
@@ -264,32 +264,32 @@ def scan_nmap(host, tmp):
                 if sid == "ssh2-enum-algos" and ("ssh-rsa" in low or "group1-sha1" in low):
                     out_findings.append(finding(
                         "nmap", "ssh-weak-algo", "medium", host,
-                        f"SSH {num} menawarkan algoritma lemah (ssh-rsa / group1-sha1)",
-                        "larang algoritma SHA-1 dalam sshd_config"))
+                        f"SSH {num} offers weak algorithms (ssh-rsa / group1-sha1)",
+                        "disable SHA-1 algorithms in sshd_config"))
                 if sid == "ssl-enum-ciphers":
                     if "sslv3" in low:
                         out_findings.append(finding(
                             "nmap", "ssl-sslv3", "high", host,
-                            f"SSLv3 aktif pada port {num}", "lumpuhkan SSLv3"))
+                            f"SSLv3 enabled on port {num}", "disable SSLv3"))
                     elif "tlsv1.0" in low or "tlsv1.1" in low:
                         out_findings.append(finding(
                             "nmap", "ssl-legacy", "medium", host,
-                            f"TLS 1.0/1.1 aktif pada port {num}", "lumpuhkan TLS 1.0/1.1"))
+                            f"TLS 1.0/1.1 enabled on port {num}", "disable TLS 1.0/1.1"))
     return out_findings, None, open_ports
 
 
 def scan_sshaudit(host, tmp):
-    """ssh-audit keluar 0 (selamat) atau 3 (ada fail/warn) — bukan ralat.
+    """ssh-audit exits 0 (clean) or 3 (fail/warn present) — not an error.
 
-    Pelarasan (didokumen dalam README): dua kategori dalam ssh-audit ialah
-    pendapat/anjuran, bukan kerosakan sebenar —
-      • 'suspected as being backdoored' (kiraan NIST curves) → low
-      • 'post-quantum' (persediaan masa depan)                → info
-    [fail] lain (cth SHA-1 rosak) kekal high.
+    Tuning (documented in README): two categories in ssh-audit are
+    opinions/advisories, not real breakage —
+      • 'suspected as being backdoored' (NIST curve count) → low
+      • 'post-quantum' (future-proofing)                  → info
+    Other [fail] items (e.g. broken SHA-1) stay high.
     """
     rc, out, err = run(["ssh-audit", host], timeout=300)
     if not out.strip():
-        return [], f"ssh-audit gagal (rc={rc}): {err.strip()[:200]}"
+        return [], f"ssh-audit failed (rc={rc}): {err.strip()[:200]}"
     out_findings = []
     for line in out.splitlines():
         s = line.strip()
@@ -304,11 +304,11 @@ def scan_sshaudit(host, tmp):
         else:
             continue
         out_findings.append(finding("ssh-audit", rule, sev, host, s,
-                                    "betulkan mengikut cadangan ssh-audit"))
+                                    "fix it per the ssh-audit recommendation"))
     return out_findings, None
 
 
-# ------------------------------------------------------------- skop
+# --------------------------------------------------------------- scope
 
 def host_of(target):
     p = urlparse(target if "://" in target else "//" + target)
@@ -322,7 +322,7 @@ def scope_allows(scope_file, target):
             entries = [ln.strip() for ln in fh
                        if ln.strip() and not ln.strip().startswith("#")]
     except OSError as e:
-        sys.exit(f"ralat: fail skop tidak boleh dibaca: {e}")
+        sys.exit(f"error: cannot read scope file: {e}")
 
     try:
         ip = ipaddress.ip_address(host)
@@ -352,24 +352,24 @@ def auto_kind(target):
         return "web"
     if re.match(r"^[A-Za-z0-9_.\-]+(:\d+)?$", target):
         return "server"
-    sys.exit(f"ralat: tidak dapat tentukan jenis sasaran: {target} (guna --kind)")
+    sys.exit(f"error: cannot determine target kind: {target} (use --kind)")
 
 
 # ------------------------------------------------------------ verdict
 
 def verdict_of(findings, tool_errors, fail_on):
     if tool_errors:
-        return "TIDAK LULUS", "tool gagal dijalankan — tiada bukti, tiada kelulusan"
+        return "FAIL", "tool failed to run — no evidence, no approval"
     counts = {s: 0 for s in SEV_ORDER}
     for f in findings:
         counts[f["severity"]] = counts.get(f["severity"], 0) + 1
     threshold = SEV_WEIGHT[fail_on]
     worst = max((SEV_WEIGHT[f["severity"]] for f in findings), default=-1)
     if worst >= threshold:
-        return "TIDAK LULUS", f"ada isu {fail_on} atau lebih teruk"
+        return "FAIL", f"has {fail_on} or worse issues"
     if counts["medium"]:
-        return "LULUS BERSYARAT", "tiada isu kritikal/high, tetapi ada medium"
-    return "LULUS", "tiada isu melepasi ambang"
+        return "CONDITIONAL", "no critical/high issues, but medium issues exist"
+    return "PASS", "no issue crossed the threshold"
 
 
 def git_commit(repo):
@@ -381,22 +381,22 @@ def write_report(path, result):
     c = result["counts"]
     meta = result["meta"]
     lines = [
-        "# Laporan Security Gate",
+        "# Security Gate Report",
         "",
-        f"**Sasaran:** `{meta['target']}`  ",
-        f"**Jenis:** {meta['kind']}  ",
+        f"**Target:** `{meta['target']}`  ",
+        f"**Kind:** {meta['kind']}  ",
     ]
     if meta.get("commit"):
         lines.append(f"**Commit:** `{meta['commit']}`  ")
     if meta.get("scope"):
-        lines.append(f"**Fail skop:** `{meta['scope']}`  ")
+        lines.append(f"**Scope file:** `{meta['scope']}`  ")
     lines += [
-        f"**Masa:** {meta['timestamp']}  ",
+        f"**Time:** {meta['timestamp']}  ",
         f"**Verdict:** **{result['verdict']}** — {result['reason']}",
         "",
-        "## Kiraan isu",
+        "## Issue counts",
         "",
-        "| Tahap | Bilangan |",
+        "| Level | Count |",
         "|---|---|",
     ]
     for s in SEV_ORDER:
@@ -405,17 +405,17 @@ def write_report(path, result):
     if not any(c.values()):
         lines.append("| — | 0 |")
 
-    lines += ["", "## Alat", "", "| Alat | Versi | Status |", "|---|---|---|"]
+    lines += ["", "## Tools", "", "| Tool | Version | Status |", "|---|---|---|"]
     for name, ver in meta["tools"].items():
-        status = "OK" if name not in result["tool_errors"] else "GAGAL"
+        status = "OK" if name not in result["tool_errors"] else "FAILED"
         lines.append(f"| {name} | {ver or '-'} | {status} |")
     for name, err in result["tool_errors"].items():
         lines.append(f"\n> {name}: {err}")
 
     top = sorted(result["findings"], key=lambda f: SEV_WEIGHT[f["severity"]], reverse=True)[:25]
     if top:
-        lines += ["", "## Isu utama", "",
-                  "| Tahap | Alat | Sasaran:baris | Isu | Pembaikan |",
+        lines += ["", "## Top issues", "",
+                  "| Level | Tool | Target:line | Issue | Fix |",
                   "|---|---|---|---|---|"]
         for f in top:
             loc = f"{f['file']}:{f['line']}" if f["line"] else f["file"]
@@ -423,9 +423,9 @@ def write_report(path, result):
             fix = (f["fix"] or "-").replace("|", "/")[:100]
             lines.append(f"| {f['severity']} | {f['tool']} | `{loc}` | {msg} | {fix} |")
         if len(result["findings"]) > len(top):
-            lines.append(f"\n*{len(result['findings']) - len(top)} isu lagi dalam gate.json.*")
+            lines.append(f"\n*{len(result['findings']) - len(top)} more issues in gate.json.*")
     else:
-        lines += ["", "_Tiada isu dilaporkan._"]
+        lines += ["", "_No issues reported._"]
 
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -433,14 +433,14 @@ def write_report(path, result):
 
 def main():
     ap = argparse.ArgumentParser(description="KimRity Security Gate v2")
-    ap.add_argument("target", help="repo/folder, URL, atau host/IP")
+    ap.add_argument("target", help="repo/folder, URL, or host/IP")
     ap.add_argument("--kind", choices=["repo", "web", "server"], default=None)
-    ap.add_argument("--scope", default=None, help="fail senarai sasaran dibenarkan")
+    ap.add_argument("--scope", default=None, help="file listing allowed targets")
     ap.add_argument("--authorized", action="store_true",
-                    help="sahkan kau ada kebenaran menyasar (wajib untuk web/server)")
-    ap.add_argument("--out", default="gate-out", help="folder keluaran (lalai: ./gate-out)")
+                    help="confirm you are authorized to scan this target (required for web/server)")
+    ap.add_argument("--out", default="gate-out", help="output directory (default: ./gate-out)")
     ap.add_argument("--fail-on", default="high", choices=["critical", "high", "medium"],
-                    help="ambang TIDAK LULUS (lalai: high)")
+                    help="FAIL threshold (default: high)")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
@@ -448,12 +448,12 @@ def main():
     target = os.path.abspath(args.target) if kind == "repo" else args.target
 
     if kind == "repo" and not os.path.isdir(target):
-        sys.exit(f"ralat: bukan folder: {target}")
+        sys.exit(f"error: not a directory: {target}")
     if kind in ("web", "server") and not args.authorized:
-        sys.exit("ralat: imbasan aktif perlukan --authorized "
-                 "(kau sahkan kau ada kebenaran menyasar sasaran ini)")
+        sys.exit("error: active scans require --authorized "
+                 "(confirm you are authorized to scan this target)")
     if args.scope and not scope_allows(args.scope, target):
-        sys.exit(f"ralat: sasaran {host_of(target)} tiada dalam fail skop {args.scope}")
+        sys.exit(f"error: target {host_of(target)} is not in the scope file {args.scope}")
 
     os.makedirs(args.out, exist_ok=True)
     tmp = os.path.join(args.out, ".raw")
@@ -466,7 +466,7 @@ def main():
             print(f"[gate] {name} ...", flush=True)
         versions[name] = tool_version(name)
         if versions[name] is None:
-            tool_errors[name] = "tool tidak dipasang atau tidak boleh dijalankan"
+            tool_errors[name] = "tool not installed or not runnable"
             return None
         res = fn(*a)
         findings.extend(res[0])
@@ -487,7 +487,7 @@ def main():
     else:
         host = host_of(target)
         open_ports = do("nmap", scan_nmap, host, tmp) or set()
-        # ssh-audit hanya jika port 22 terbuka (atau nmap gagal → cuba juga)
+        # run ssh-audit only if port 22 is open (or nmap failed → try anyway)
         if 22 in open_ports or "nmap" in tool_errors:
             do("ssh-audit", scan_sshaudit, host, tmp)
 
@@ -515,14 +515,14 @@ def main():
     }
 
     json_path = os.path.join(args.out, "gate.json")
-    md_path = os.path.join(args.out, "laporan.md")
+    md_path = os.path.join(args.out, "report.md")
     with open(json_path, "w", encoding="utf-8") as fh:
         json.dump(result, fh, ensure_ascii=False, indent=2)
     write_report(md_path, result)
 
     print(f"[gate] {verdict} — {reason}")
-    print(f"[gate] {len(findings)} isu | bukti: {json_path} | laporan: {md_path}")
-    sys.exit(0 if verdict in ("LULUS", "LULUS BERSYARAT") else 1)
+    print(f"[gate] {len(findings)} issues | evidence: {json_path} | report: {md_path}")
+    sys.exit(0 if verdict in ("PASS", "CONDITIONAL") else 1)
 
 
 if __name__ == "__main__":

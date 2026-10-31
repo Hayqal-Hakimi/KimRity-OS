@@ -1,6 +1,6 @@
 #!/bin/sh
-# Pilih dari sejarah clipboard (cliphist) melalui wofi.
+# Pick from clipboard history (cliphist) through wofi.
 set -u
-sel="$(cliphist list | wofi --dmenu -i -p 'klip')" || exit 0
+sel="$(cliphist list | wofi --dmenu -i -p 'clip')" || exit 0
 [ -n "$sel" ] || exit 0
 printf '%s' "$sel" | cliphist decode | wl-copy

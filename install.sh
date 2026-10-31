@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-# install.sh — pemasang Arch + Hyprland minimal untuk projek os-security-ai
+# install.sh — minimal Arch + Hyprland installer for the os-security-ai project
 #
-# Dijalankan dari Arch ISO (atau sistem Arch yang ada arch-install-scripts)
-# sebagai root. Ia MEMUSNAHKAN disk yang diberi — tiada nilai lalai.
+# Run from an Arch ISO (or any Arch system with arch-install-scripts)
+# as root. It DESTROYS the given disk — no default target.
 #
 #   ./install.sh --disk /dev/vda --hostname arch-uji --user hayqal
-#   ./install.sh --disk /dev/vda --dry-run        # cetak sahaja, tiada perubahan
+#   ./install.sh --disk /dev/vda --dry-run        # print only, no changes
 #
-# Selepas siap: `passwd` (root) dan `passwd <user>` — password TIDAK pernah
-# ditetapkan oleh skrip ini.
+# After it finishes: `passwd` (root) and `passwd <user>` — passwords are NEVER
+# set by this script.
 # =============================================================================
 set -Eeuo pipefail
 
-# ---------------------------------------------------------------- tetapan lalai
+# ----------------------------------------------------------------- defaults
 HOSTNAME="arch-uji"
 USERNAME="hayqal"
 USER_UID=1000
@@ -45,7 +45,7 @@ DESKTOP_PKGS=(hyprland kitty waybar wofi mako xdg-desktop-portal-hyprland xdg-de
               ttf-jetbrains-mono-nerd)
 TOOL_PKGS=(git base-devel btop wl-clipboard grim slurp tcpdump nmap audit yara firefox gptfdisk iputils inetutils)
 
-# --------------------------------------------------------------------- utiliti
+# ------------------------------------------------------------------ utilities
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
 step() { printf '\n%s==> %s%s\n' "$c_grn" "$*" "$c_off"; }
 info() { printf '    %s\n' "$*"; }
@@ -60,24 +60,24 @@ run() {
 
 usage() {
   cat <<EOF
-Guna: $(basename "$0") --disk /dev/XXX [pilihan]
+Usage: $(basename "$0") --disk /dev/XXX [options]
 
-  --disk PATH      (WAJIB) disk sasaran, contoh /dev/vda  — akan DIPADAM
-  --hostname NAME  lalai: $HOSTNAME
-  --user NAME      lalai: $USERNAME (UID 1000, kumpulan wheel)
-  --timezone TZ    lalai: $TIMEZONE
-  --dotfiles DIR   lalai: $DOTFILES_DIR
-  --yes            jangan minta pengesahan bertaip
-  --force          benarkan disk yang ada partisi NTFS (Windows)
-  --efi            VM: tulis entri NVRAM Limine melalui efibootmgr
-  --no-arsenal     jangan pasang tool BlackArch + Security Gate
-  --ai             pasang juga tool AI security berat (garak, promptfoo…)
-  --dry-run        cetak arahan sahaja, tiada perubahan
+  --disk PATH      (REQUIRED) target disk, e.g. /dev/vda  — it will be ERASED
+  --hostname NAME  default: $HOSTNAME
+  --user NAME      default: $USERNAME (UID 1000, group wheel)
+  --timezone TZ    default: $TIMEZONE
+  --dotfiles DIR   default: $DOTFILES_DIR
+  --yes            do not ask for typed confirmation
+  --force          allow a disk that already has NTFS partitions (Windows)
+  --efi            VM: write a Limine NVRAM entry via efibootmgr
+  --no-arsenal     do not install the BlackArch tools + Security Gate
+  --ai             also install heavy AI security tools (garak, promptfoo…)
+  --dry-run        print commands only, no changes
   -h, --help
 EOF
 }
 
-# ------------------------------------------------------------------ hujah CLI
+# ------------------------------------------------------------------ CLI args
 while [ $# -gt 0 ]; do
   case "$1" in
     --disk)      DISK="${2:-}"; shift 2 ;;
@@ -92,11 +92,11 @@ while [ $# -gt 0 ]; do
     --ai)        AI_PKGS=1; shift ;;
     --dry-run)   DRY=1; shift ;;
     -h|--help)   usage; exit 0 ;;
-    *) die "hujah tidak dikenali: $1 (guna --help)" ;;
+    *) die "unknown argument: $1 (use --help)" ;;
   esac
 done
 
-# partisi: /dev/vda1 tetapi /dev/nvme0n1p1
+# partition: /dev/vda1 but /dev/nvme0n1p1
 part() {
   case "$DISK" in
     *nvme*|*mmcblk*) printf '%sp%s' "$DISK" "$1" ;;
@@ -104,59 +104,59 @@ part() {
   esac
 }
 
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "alat tiada: $1"; }
+need_cmd() { command -v "$1" >/dev/null 2>&1 || die "tool missing: $1"; }
 
-# ------------------------------------------------------------------- preflight
+# ----------------------------------------------------------------- preflight
 preflight() {
   step "Preflight"
 
-  [ "$(id -u)" -eq 0 ] || die "mesti dijalankan sebagai root"
-  [ -n "$DISK" ] || die "--disk WAJIB (tiada nilai lalai — ini memadam disk)"
+  [ "$(id -u)" -eq 0 ] || die "must run as root"
+  [ -n "$DISK" ] || die "--disk is REQUIRED (no default value — it erases a disk)"
 
-  [ -b "$DISK" ] || die "$DISK bukan block device"
-  [ -d "/sys/block/$(basename "$DISK")" ] || die "$DISK bukan disk penuh (jangan beri partisi)"
+  [ -b "$DISK" ] || die "$DISK is not a block device"
+  [ -d "/sys/block/$(basename "$DISK")" ] || die "$DISK is not a whole disk (do not pass a partition)"
 
-  info "disk sasaran : $DISK ($(lsblk -dno SIZE "$DISK" | tr -d ' '))"
-  info "hostname     : $HOSTNAME"
-  info "user         : $USERNAME (UID $USER_UID)"
-  info "zon masa     : $TIMEZONE"
-  info "dotfiles     : $DOTFILES_DIR"
+  info "target disk : $DISK ($(lsblk -dno SIZE "$DISK" | tr -d ' '))"
+  info "hostname    : $HOSTNAME"
+  info "user        : $USERNAME (UID $USER_UID)"
+  info "timezone    : $TIMEZONE"
+  info "dotfiles    : $DOTFILES_DIR"
 
-  # Elak memadam disk yang sedang memegang ISO
+  # Avoid wiping the disk that is currently holding the ISO
   local iso_src iso_parent
   iso_src="$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)"
   if [ -n "$iso_src" ]; then
     iso_parent="$(lsblk -no PKNAME "$iso_src" 2>/dev/null | head -1 || true)"
     [ "$iso_parent" = "$(basename "$DISK")" ] && \
-      die "disk ini memegang ISO yang sedang berjalan — pilih disk lain"
+      die "this disk holds the running ISO — pick another disk"
   fi
 
-  # Elak memadam Windows (peraturan projek: sda tidak boleh disentuh)
+  # Avoid wiping Windows (project rule: sda must never be touched)
   if lsblk -no FSTYPE "$DISK" 2>/dev/null | grep -qx 'ntfs'; then
-    [ "$FORCE" = 1 ] || die "disk ini mengandungi NTFS (Windows). Guna --force hanya jika betul-betul pasti"
-    warn "disk ada NTFS — diteruskan kerana --force"
+    [ "$FORCE" = 1 ] || die "this disk contains NTFS (Windows). Use --force only if you are absolutely sure"
+    warn "disk has NTFS — continuing because of --force"
   fi
 
-  # Jangan sentuh disk yang ada partisi dilekap
+  # Do not touch a disk whose partitions are still mounted
   if lsblk -no MOUNTPOINT "$DISK" 2>/dev/null | grep -qv '^$'; then
-    die "ada partisi pada $DISK yang masih dilekap — nyahlekap dahulu"
+    die "a partition on $DISK is still mounted — unmount it first"
   fi
 
   if [ ! -d /sys/firmware/efi ]; then
-    die "sistem ini bukan UEFI (tiada /sys/firmware/efi) — skrip ini hanya untuk UEFI"
+    die "this system is not UEFI (no /sys/firmware/efi) — this script only supports UEFI"
   fi
 
   local size_gib
   size_gib=$(lsblk -bdno SIZE "$DISK" | awk '{printf "%d", $1/1024/1024/1024}')
-  [ "$size_gib" -ge 20 ] || die "disk terlalu kecil (${size_gib} GiB) — perlu ≥ 20 GiB"
+  [ "$size_gib" -ge 20 ] || die "disk is too small (${size_gib} GiB) — needs ≥ 20 GiB"
 
   local c
   for c in sgdisk mkfs.fat mkfs.btrfs pacstrap arch-chroot genfstab blkid; do
     need_cmd "$c"
   done
-  [ -d "$DOTFILES_DIR" ] || warn "dotfiles tiada: $DOTFILES_DIR — langkah dotfiles akan dilangkau"
+  [ -d "$DOTFILES_DIR" ] || warn "dotfiles missing: $DOTFILES_DIR — the dotfiles step will be skipped"
 
-  info "semua semakan lulus"
+  info "all checks passed"
 }
 
 confirm() {
@@ -165,30 +165,30 @@ confirm() {
 
   cat <<EOF
 
-$(printf '%s' "$c_red")AMARAN: semua data pada $DISK akan dipadam.$(printf '%s' "$c_off")
-Tulis YES untuk teruskan: 
+$(printf '%s' "$c_red")WARNING: all data on $DISK will be erased.$(printf '%s' "$c_off")
+Type YES to continue:
 EOF
   local ans; read -r ans
-  [ "$ans" = "YES" ] || die "dibatalkan oleh pengguna"
+  [ "$ans" = "YES" ] || die "cancelled by the user"
 }
 
-# -------------------------------------------------------------------- langkah
+# -------------------------------------------------------------------- steps
 partition_disk() {
-  step "1/10 Partisi GPT: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (baki)"
+  step "1/10 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
   run wipefs -a "$DISK"
   run sgdisk --zap-all "$DISK"
   run sgdisk -n "1:0:+1G" -t "1:ef00" -c "1:$ESP_LABEL" "$DISK"
   run sgdisk -n "2:0:0"   -t "2:8300" -c "2:$ROOT_LABEL" "$DISK"
   run udevadm settle
 
-  # tunggu node partisi muncul (kernel/udev, bukan partprobe)
+  # wait for partition nodes to appear (kernel/udev, not partprobe)
   if [ "$DRY" = 0 ]; then
     local i
     for i in $(seq 1 20); do
       [ -b "$(part 1)" ] && [ -b "$(part 2)" ] && break
       sleep 0.5
     done
-    [ -b "$(part 1)" ] && [ -b "$(part 2)" ] || die "partisi tidak muncul selepas partisi"
+    [ -b "$(part 1)" ] && [ -b "$(part 2)" ] || die "partitions did not appear after partitioning"
   fi
 }
 
@@ -199,7 +199,7 @@ format_and_mount() {
   run mkfs.fat -F 32 -n "$ESP_LABEL" "$esp"
   run mkfs.btrfs -f -L "$ROOT_LABEL" "$root"
 
-  step "3/10 Subvolume + lekap ($MOUNT_OPTS)"
+  step "3/10 Subvolumes + mounts ($MOUNT_OPTS)"
   run mount "$root" "$MOUNTPOINT"
   run btrfs subvolume create "$MOUNTPOINT/$ROOT_SUBVOL"
   run btrfs subvolume create "$MOUNTPOINT/$HOME_SUBVOL"
@@ -211,7 +211,7 @@ format_and_mount() {
 }
 
 pacstrap_base() {
-  step "4/10 pacstrap pakej asas (${#BASE_PKGS[@]} pakej)"
+  step "4/10 pacstrap base packages (${#BASE_PKGS[@]} packages)"
   run pacstrap -K "$MOUNTPOINT" "${BASE_PKGS[@]}"
 
   step "5/10 genfstab"
@@ -226,10 +226,10 @@ pacstrap_base() {
 chroot_configure() {
   local cfile="$MOUNTPOINT/root/chroot-setup.sh"
 
-  step "6/10 Konfigurasi dalam chroot (zon, locale, hostname, initramfs, user, sudoers)"
+  step "6/10 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
 
   if [ "$DRY" = 1 ]; then
-    printf '[dry] tulis %s dan jalankan: arch-chroot %s bash /root/chroot-setup.sh\n' "$cfile" "$MOUNTPOINT"
+    printf '[dry] write %s and run: arch-chroot %s bash /root/chroot-setup.sh\n' "$cfile" "$MOUNTPOINT"
     return 0
   fi
 
@@ -251,7 +251,7 @@ systemctl enable NetworkManager
 systemctl enable sshd
 systemctl enable auditd
 
-# Log kekal (penemuan artifak #1: journald tidak kekal secara lalai)
+# Persistent logs (artifact finding #1: journald is not persistent by default)
 mkdir -p /var/log/journal
 
 id -u "$USERNAME" >/dev/null 2>&1 || \
@@ -275,12 +275,12 @@ bootloader_limine() {
   step "7/10 Limine (fallback path + limine.conf)"
 
   if [ "$DRY" = 1 ]; then
-    printf '[dry] cp BOOTX64.EFI -> %s/boot/EFI/BOOT/ ; tulis limine.conf (UUID dari blkid)\n' "$MOUNTPOINT"
+    printf '[dry] cp BOOTX64.EFI -> %s/boot/EFI/BOOT/ ; write limine.conf (UUID from blkid)\n' "$MOUNTPOINT"
     return 0
   fi
 
   uuid="$(blkid -s UUID -o value "$root")"
-  [ -n "$uuid" ] || die "tidak dapat UUID untuk $root"
+  [ -n "$uuid" ] || die "could not get the UUID for $root"
 
   mkdir -p "$MOUNTPOINT/boot/EFI/BOOT"
   cp "$MOUNTPOINT/usr/share/limine/BOOTX64.EFI" "$MOUNTPOINT/boot/EFI/BOOT/"
@@ -295,20 +295,20 @@ timeout: 5
     module_path: boot():/initramfs-linux.img
 CONF
 
-  info "UUID akar: $uuid"
+  info "root UUID: $uuid"
 
   if [ "$EFI" = 1 ]; then
     run efibootmgr --create --disk "$DISK" --part 1 --label "Limine" \
         --loader '\EFI\BOOT\BOOTX64.EFI' --unicode
   else
-    info "entri NVRAM dilangkau (guna --efi untuk VM); fallback path sudah cukup untuk boot"
+    info "NVRAM entry skipped (use --efi for VMs); the fallback path is already enough to boot"
   fi
 }
 
 install_dotfiles() {
   step "8/10 Dotfiles -> /home/$USERNAME"
   if [ ! -d "$DOTFILES_DIR" ]; then
-    warn "dotfiles tiada — dilangkau"; return 0
+    warn "dotfiles missing — skipped"; return 0
   fi
   if [ "$DRY" = 1 ]; then
     printf '[dry] cp %s/{hypr,kitty,waybar} -> %s/home/%s/.config/ ; bash_profile -> ~/.bash_profile\n' \
@@ -334,23 +334,23 @@ install_dotfiles() {
     cp -a "$DOTFILES_DIR/kimrity/icons/." "$home/.local/share/kimrity/icons/"
   fi
   chown -R "$USER_UID:$USER_UID" "$home"
-  info "dotfiles disalin"
+  info "dotfiles copied"
 }
 
 install_packages() {
-  step "9/10 Pakej desktop (${#DESKTOP_PKGS[@]}) + tool asas (${#TOOL_PKGS[@]})"
+  step "9/10 Desktop packages (${#DESKTOP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
   run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${DESKTOP_PKGS[@]}" "${TOOL_PKGS[@]}"
 }
 
 install_arsenal() {
-  step "10/10 Arsenal BlackArch + Security Gate"
+  step "10/10 BlackArch arsenal + Security Gate"
   if [ "$ARSENAL" = 0 ]; then
-    info "arsenal dilangkau (--no-arsenal)"; return 0
+    info "arsenal skipped (--no-arsenal)"; return 0
   fi
 
   local list="$SCRIPT_DIR/tools/arsenal.list"
   local ai_list="$SCRIPT_DIR/tools/arsenal-ai.list"
-  [ -f "$list" ] || { warn "tools/arsenal.list tiada — dilangkau"; return 0; }
+  [ -f "$list" ] || { warn "tools/arsenal.list missing — skipped"; return 0; }
 
   local pkgs=() line
   while IFS= read -r line; do
@@ -359,10 +359,11 @@ install_arsenal() {
   done < "$list"
 
   if [ "$DRY" = 1 ]; then
-    printf '[dry] setup-blackarch dalam chroot -> pacman -S %s pakej teras\n' "${#pkgs[@]}"
-    [ "$AI_PKGS" = 1 ] && printf '[dry] + group blackarch-ai (%s pakej)\n' \
+    printf '[dry] setup-blackarch inside the chroot -> pacman -S %s core packages\n' "${#pkgs[@]}"
+    [ "$AI_PKGS" = 1 ] && printf '[dry] + blackarch-ai group (%s packages)\n' \
       "$(grep -vcE '^\s*(#|$)' "$ai_list" 2>/dev/null || echo '?')"
     printf '[dry] gate.py -> /usr/local/bin/kimrity-gate\n'
+    printf '[dry] kimscan + en.yaml -> /usr/local/bin/kimscan + /usr/local/share/kimscanning/rules/\n'
     return 0
   fi
 
@@ -382,28 +383,31 @@ install_arsenal() {
 
   install -Dm755 "$SCRIPT_DIR/gate/gate.py" "$MOUNTPOINT/usr/local/bin/kimrity-gate"
   install -Dm644 "$SCRIPT_DIR/gate/README.md" "$MOUNTPOINT/usr/share/doc/kimrity/gate.md"
+  # KimScanning engine: kimscan CLI reads rules/en.yaml (English, no AI).
+  install -Dm755 "$SCRIPT_DIR/kimscanning/kimscan" "$MOUNTPOINT/usr/local/bin/kimscan"
+  install -Dm644 "$SCRIPT_DIR/kimscanning/rules/en.yaml" "$MOUNTPOINT/usr/local/share/kimscanning/rules/en.yaml"
   rm -f "$MOUNTPOINT/root/setup-blackarch.sh"
-  info "arsenal (${#pkgs[@]} pakej) + gate dipasang"
+  info "arsenal (${#pkgs[@]} packages) + gate + kimscan installed"
 }
 
 finish() {
-  step "Selesai"
+  step "Done"
   cat <<EOF
 
-Sistem dipasang pada $DISK. Yang TINGGAL (manual, sengaja):
+System installed to $DISK. What is LEFT (manual, on purpose):
 
-  1. Tetapkan password (skrip ini tidak menyentuhnya):
+  1. Set the passwords (this script does not touch them):
        arch-chroot $MOUNTPOINT passwd
        arch-chroot $MOUNTPOINT passwd $USERNAME
 
-  2. Keluar ISO dan boot dari disk:
+  2. Leave the ISO and boot from the disk:
        umount -R $MOUNTPOINT && reboot
 
-  3. Log masuk sebagai $USERNAME — Hyprland akan start sendiri.
+  3. Log in as $USERNAME — Hyprland starts on its own.
 EOF
 }
 
-# ----------------------------------------------------------------------- main
+# ---------------------------------------------------------------------- main
 main() {
   if [ "$DRY" = 0 ]; then
     mkdir -p "$(dirname "$LOG")"

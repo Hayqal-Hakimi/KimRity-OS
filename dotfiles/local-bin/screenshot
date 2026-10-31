@@ -1,5 +1,5 @@
 #!/bin/sh
-# Screenshot: full (lalai) atau region. Simpan + salin ke clipboard.
+# Screenshot: full (default) or region. Save + copy to clipboard.
 set -u
 dir="$HOME/Pictures"
 mkdir -p "$dir"

@@ -1,6 +1,6 @@
 // ~/.config/quickshell/kimrity/shell.qml
-// Menu KimRity v4: popup 900x560 — sidebar, 3 kluster workspace, app 2 lajur,
-// recent files + notes. Flat, tiada hiasan.
+// KimRity menu v4: popup 900x560 — sidebar, 3 workspace clusters, apps in 2
+// columns, recent files + notes. Flat, no decoration.
 import QtQuick
 import QtQuick.Controls
 import Quickshell
@@ -11,7 +11,7 @@ ShellRoot {
     id: root
 
     property bool isOpen: false
-    property int catIndex: -1      // -1 = semua
+    property int catIndex: -1      // -1 = all
     property int appIndex: 0
     property int wsIndex: 0
     property string filter: ""
@@ -21,8 +21,8 @@ ShellRoot {
         "System", "Office", "Multimedia", "Utilities"
     ]
 
-    // Kluster workspace — dibina daripada conf pengguna (kimrity-ws) dan
-    // ikon sebenar (kimrity-icons). Tiada tool/glyph hardcoded di sini.
+    // Workspace clusters — built from the user's conf (kimrity-ws) and real
+    // icons (kimrity-icons). No hardcoded tool/glyph here.
     property var clusters: []
     property var iconMap: ({})
     property string wsText: ""
@@ -63,13 +63,13 @@ ShellRoot {
     ]
 
     readonly property var notes: [
-        "☐ Rekod verdict Gate",
-        "☑ 12 rules audit aktif",
-        "☐ Laporan SOC L1 (hari 3)",
-        "☐ Semak keybind SUPER+F1…F3"
+        "☐ Record the Gate verdict",
+        "☑ 12 audit rules active",
+        "☐ SOC L1 report (day 3)",
+        "☐ Check the SUPER+F1…F3 keybinds"
     ]
 
-    // ---------------- seting preset ----------------
+    // ---------------- preset settings ----------------
     property bool setOpen: false
     property string editPreset: ""
     property var editRows: []
@@ -79,7 +79,7 @@ ShellRoot {
     readonly property string homeDir: Quickshell.env("HOME") || "/home/hayqal"
     readonly property string confPath: homeDir + "/.config/kimrity/workspaces.conf"
 
-    // Skrip cetak fail penuh ke stdout; UI baca dari situ (tiada cache).
+    // Scripts print the full file to stdout; the UI reads from there (no cache).
     Process {
         id: wsRunner
         stdout: StdioCollector {
@@ -94,8 +94,8 @@ ShellRoot {
         }
     }
 
-    // Conf penuh untuk kluster (bukan editor). kimrity-ws perlukan argumen
-    // preset walaupun untuk `list`; `list` mengabaikannya dan cetak semua baris.
+    // Full conf for clusters (not the editor). kimrity-ws needs the preset
+    // argument even for `list`; `list` ignores it and prints all rows.
     Process {
         id: wsListProc
         stdout: StdioCollector {
@@ -105,7 +105,7 @@ ShellRoot {
         onExited: if (!root.wsDone) root.wsListReady("")
     }
 
-    // Peta tool -> laluan ikon sebenar.
+    // Map tool -> real icon path.
     Process {
         id: iconsProc
         stdout: StdioCollector {
@@ -115,7 +115,7 @@ ShellRoot {
         onExited: if (!root.iconsDone) root.iconsReady("")
     }
 
-    // Senarai tool yang benar-benar ada (cache 1 hari) untuk dropdown.
+    // List of tools that actually exist (1-day cache) for the dropdown.
     Process {
         id: toolsProc
         stdout: StdioCollector {
@@ -162,8 +162,8 @@ ShellRoot {
         wsRunner.running = true
     }
 
-    // Muat semula kluster + ikon. Dipanggil semasa buka menu, selepas edit,
-    // dan selepas apply supaya panel tidak tunjuk data basi.
+    // Reload clusters + icons. Called when the menu opens, after edits, and
+    // after apply so the panel never shows stale data.
     function refreshClusters() {
         root.wsText = ""
         root.iconMap = ({})
@@ -218,7 +218,7 @@ ShellRoot {
             })
         }
 
-        // Preset sentiasa tiga, dalam tertib ini; baris diisih ikut workspace.
+        // The presets are always these three, in this order; rows sort by workspace.
         const keys = ["F1", "F2", "F3"]
         const out = []
         for (let i = 0; i < keys.length; i++) {
@@ -243,7 +243,7 @@ ShellRoot {
         root.clusters = out
     }
 
-    // Maksimum 4 tile: 3 tool + satu tile "+N" jika lebih.
+    // Maximum 4 tiles: 3 tools + one "+N" tile when there are more.
     function tilesFor(cluster) {
         const t = (cluster && cluster.tools) ? cluster.tools : []
         if (t.length <= 4) return t
@@ -281,10 +281,10 @@ ShellRoot {
         function openMenu(): void { root.isOpen = true }
         function closeMenu(): void { root.isOpen = false }
         function openSettings(key: string): void { root.isOpen = true; root.openEditor(key) }
-        function wsApply(key: string, baris: string, ws: string): void {
+        function wsApply(key: string, rowNo: string, ws: string): void {
             root.isOpen = true
             if (root.editPreset !== key) root.openEditor(key)
-            root.wsCall(["set", key, baris, ws])
+            root.wsCall(["set", key, rowNo, ws])
         }
     }
 
@@ -321,7 +321,7 @@ ShellRoot {
         }
     }
 
-    // ---------------- tetingkap ----------------
+    // ---------------- window ----------------
     LazyLoader {
         active: root.isOpen
 
@@ -348,7 +348,7 @@ ShellRoot {
                 border.color: "#1a2336"
                 border.width: 1
 
-                // ================= editor seting preset =================
+                // ================= preset settings editor =================
                 Rectangle {
                     id: editor
                     visible: root.editPreset !== ""
@@ -358,7 +358,7 @@ ShellRoot {
                     height: parent.height - 16
                     radius: 11; color: "#101728"
 
-                    // telan klik kosong supaya tidak tembus ke dashboard di belakang
+                    // Swallow empty clicks so they do not fall through to the dashboard behind.
                     MouseArea { anchors.fill: parent; onClicked: {} }
 
                     Column {
@@ -370,7 +370,7 @@ ShellRoot {
                             width: parent.width
                             spacing: 12
                             Text {
-                                text: "Seting · " + root.editPreset + " " + (root.clusters[root.wsIndex] ? root.clusters[root.wsIndex].label : "")
+                                text: "Settings · " + root.editPreset + " " + (root.clusters[root.wsIndex] ? root.clusters[root.wsIndex].label : "")
                                 color: "#e3ebff"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 13
                                 anchors.verticalCenter: parent.verticalCenter
                             }
@@ -381,7 +381,7 @@ ShellRoot {
                                 anchors.verticalCenter: parent.verticalCenter
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "Semua → Tab 1"; color: "#4fd1c5"
+                                    text: "All → Tab 1"; color: "#4fd1c5"
                                     font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                 }
                                 MouseArea {
@@ -396,7 +396,7 @@ ShellRoot {
                                 anchors.verticalCenter: parent.verticalCenter
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "Kembali"; color: "#c3cde6"
+                                    text: "Back"; color: "#c3cde6"
                                     font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                 }
                                 MouseArea { anchors.fill: parent; onClicked: root.editPreset = "" }
@@ -404,7 +404,7 @@ ShellRoot {
                         }
 
                         Text {
-                            text: "Nombor = workspace. Sama nombor = tab sama. Klik untuk tukar."
+                            text: "Number = workspace. Same number = same tab. Click to change."
                             color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                         }
 
@@ -421,7 +421,7 @@ ShellRoot {
                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                             }
                             Text {
-                                text: "ARAHAN / LINK"; color: "#5f6c8c"
+                                text: "CMD / LINK"; color: "#5f6c8c"
                                 font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
                             }
                         }
@@ -537,7 +537,7 @@ ShellRoot {
                                         anchors.verticalCenter: parent.verticalCenter
                                         Text {
                                             anchors.centerIn: parent
-                                            text: "Buang"; color: "#e08b95"
+                                            text: "Remove"; color: "#e08b95"
                                             font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                                         }
                                         MouseArea {
@@ -593,7 +593,7 @@ ShellRoot {
                                         }
                                         Text {
                                             visible: parent.text.length === 0
-                                            text: "tool — cth: firefox"
+                                            text: "tool — e.g.: firefox"
                                             color: "#6c7a9c"; font: parent.font
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
@@ -621,7 +621,7 @@ ShellRoot {
                                         Keys.onPressed: (e) => root.handleFieldKey(e)
                                         Text {
                                             visible: parent.text.length === 0
-                                            text: "arahan / link — cth: https://youtube.com"
+                                            text: "cmd / link — e.g.: https://youtube.com"
                                             color: "#6c7a9c"; font: parent.font
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
@@ -655,7 +655,7 @@ ShellRoot {
 
                                     Text {
                                         anchors.centerIn: parent
-                                        text: "＋ Tambah"; color: "#06221f"
+                                        text: "＋ Add"; color: "#06221f"
                                         font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
                                         font.bold: true
                                     }
@@ -664,7 +664,7 @@ ShellRoot {
                                         onClicked: {
                                             let t = addTool.text.trim()
                                             let a = addArgs.text.trim()
-                                            // pisahkan jika link tersalah taip dalam kotak tool
+                                            // split off a link accidentally typed into the tool box
                                             const i = t.indexOf("http")
                                             if (i > 0) {
                                                 a = t.slice(i) + (a.length > 0 ? " " + a : "")
@@ -684,7 +684,7 @@ ShellRoot {
                                 }
                             }
 
-                            // dropdown tool yang memang terpasang
+                            // dropdown of tools that are actually installed
                             Rectangle {
                                 id: toolDrop
                                 visible: addTool.activeFocus && root.toolHits.length > 0
@@ -793,7 +793,7 @@ ShellRoot {
                                 MouseArea { anchors.fill: parent; onClicked: { root.catIndex = -1; root.appIndex = 0 } }
                             }
 
-                            // --- dropdown: Seting preset ---
+                            // --- dropdown: preset settings ---
                             Rectangle {
                                 width: parent.width; height: 26; radius: 6; color: "transparent"
                                 Row {
@@ -801,7 +801,7 @@ ShellRoot {
                                     anchors.left: parent.left; anchors.leftMargin: 9
                                     spacing: 8
                                     Text { text: "\uf013"; color: "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
-                                    Text { text: "Seting preset"; color: "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
+                                    Text { text: "Preset settings"; color: "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
                                     Text {
                                         text: root.setOpen ? "\uf077" : "\uf078"
                                         color: "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
@@ -854,7 +854,7 @@ ShellRoot {
                                 }
                             }
 
-                            // tolak baki ke bawah
+                            // push the rest to the bottom
                             Item { width: 1; height: Math.max(0, parent.height - 30 - 4 - 28 - 26 - root.cats.length * 26 - 26 - 4 - (root.setOpen ? 100 : 0)) }
 
                             Rectangle {
@@ -871,7 +871,7 @@ ShellRoot {
                         }
                     }
 
-                    // ================= lajur utama =================
+                    // ================= main column =================
                     Column {
                         width: parent.width - 176
                         height: parent.height
@@ -888,7 +888,7 @@ ShellRoot {
                             }
                             Text {
                                 anchors.right: parent.right; anchors.rightMargin: 12; y: 11
-                                text: "F1–F3: lancar semua app ke workspace 1–3"
+                                text: "F1–F3: launch every app into workspace 1–3"
                                 color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                             }
 
@@ -917,7 +917,7 @@ ShellRoot {
                                                 border.color: "#4fd1c5"
                                                 scale: root.wsIndex === index ? 1.06 : 1.0
 
-                                                // Satu baris -> satu tile besar; jika tidak 2x2.
+                                                // One row -> one big tile; otherwise 2x2.
                                                 Item {
                                                     anchors.centerIn: parent
                                                     width: cluster.count === 1 ? 64 : 70
@@ -960,7 +960,7 @@ ShellRoot {
                                                                         asynchronous: true
                                                                     }
 
-                                                                    // Fallback monogram — hanya bila tiada ikon.
+                                                                    // Monogram fallback — only when there is no icon.
                                                                     Text {
                                                                         visible: !root.hasIcon(modelData)
                                                                         text: modelData.more ? modelData.tool : root.monogram(modelData.tool)
@@ -974,8 +974,8 @@ ShellRoot {
                                                                         font.bold: true
                                                                     }
 
-                                                                    // Nama tool di dalam tile (2x2): ruang 96px
-                                                                    // tidak cukup untuk tile 34px + kapsyen luar.
+                                                                    // Tool name inside the tile (2x2): the 96px space
+                                                                    // is not enough for a 34px tile + an outer caption.
                                                                     Text {
                                                                         visible: cluster.count > 1 && !modelData.more
                                                                         anchors.horizontalCenter: parent.horizontalCenter
@@ -992,7 +992,7 @@ ShellRoot {
                                                                     }
                                                                 }
 
-                                                                // Satu baris: nama di bawah tile besar.
+                                                                // One row: name under the big tile.
                                                                 Text {
                                                                     visible: cluster.count === 1
                                                                     width: parent.width
@@ -1048,7 +1048,7 @@ ShellRoot {
                             }
                         }
 
-                        // ----- apps 2 lajur -----
+                        // ----- apps in 2 columns -----
                         Rectangle {
                             width: parent.width; height: 232
                             radius: 11; color: "#101728"
@@ -1056,7 +1056,7 @@ ShellRoot {
                             Text { x: 12; y: 10; text: "Apps"; color: "#b9c6e2"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
                             Text {
                                 anchors.right: parent.right; anchors.rightMargin: 12; y: 11
-                                text: root.apps.length + " app · 2 lajur"
+                                text: root.apps.length + " apps · 2 columns"
                                 color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
                             }
 

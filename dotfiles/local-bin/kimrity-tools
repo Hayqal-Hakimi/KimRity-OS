@@ -1,11 +1,11 @@
 #!/bin/sh
-# kimrity-tools — senarai tool yang benar-benar ada (PATH + ~/.local/bin), cache 1 hari.
+# kimrity-tools — list of tools that actually exist (PATH + ~/.local/bin), 1-day cache.
 cache="${XDG_CACHE_HOME:-$HOME/.cache}/kimrity/tools.txt"
 
-jarak=999999
-[ -s "$cache" ] && jarak=$(( $(date +%s) - $(stat -c %Y "$cache") ))
+age=999999
+[ -s "$cache" ] && age=$(( $(date +%s) - $(stat -c %Y "$cache") ))
 
-if [ "$jarak" -gt 86400 ]; then
+if [ "$age" -gt 86400 ]; then
     mkdir -p "$(dirname "$cache")"
     {
         printf '%s\n' "$PATH" | tr ':' '\n'

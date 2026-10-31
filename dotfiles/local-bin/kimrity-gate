@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# kimrity-gate — NDJSON wrapper untuk KimRity Security Gate CLI.
+# kimrity-gate — NDJSON wrapper for the KimRity Security Gate CLI.
 #
-# Penggunaan:
-#   kimrity-gate <repo|web|server> <sasaran> [authorized]
+# Usage:
+#   kimrity-gate <repo|web|server> <target> [authorized]
 #
-# Setiap baris stdout ialah satu objek JSON (NDJSON) supaya panel Quickshell
-# boleh memaparkan kemajuan scanner. Keputusan akhir dibaca daripada gate.json
-# sebenar — tiada dapatan direka.
+# Every stdout line is one JSON object (NDJSON) so the Quickshell panel
+# can display scanner progress. The final verdict is read from the real
+# gate.json — no findings are invented.
 set -u
 
 kind="${1:-}"
@@ -23,19 +23,19 @@ emit_error() {
 }
 
 if [ -z "$kind" ] || [ -z "$target" ]; then
-    emit_error "penggunaan: kimrity-gate <repo|web|server> <sasaran> [authorized]"
+    emit_error "usage: kimrity-gate <repo|web|server> <target> [authorized]"
 fi
 
 case "$kind" in
     repo|web|server) ;;
-    *) emit_error "jenis tidak sah: $kind (guna repo|web|server)" ;;
+    *) emit_error "invalid kind: $kind (use repo|web|server)" ;;
 esac
 
 if { [ "$kind" = "web" ] || [ "$kind" = "server" ]; } && [ "$auth" != "authorized" ]; then
-    emit_error "imbasan $kind perlukan argumen 'authorized'"
+    emit_error "a $kind scan requires the 'authorized' argument"
 fi
 
-# Resolve CLI. Jangan guna `command -v kimrity-gate` — itu skrip ini sendiri.
+# Resolve the CLI. Do not use `command -v kimrity-gate` — that is this script itself.
 cli="${KIMRITY_GATE_CLI:-/usr/local/bin/kimrity-gate}"
 cli_cmd=()
 if [ -x "$cli" ] && [ ! -d "$cli" ]; then
@@ -45,15 +45,16 @@ elif [ -f "$cli" ] && [ "${cli##*.}" = "py" ]; then
 elif [ -f "$HOME/Documents/projects/os-security-ai/gate/gate.py" ]; then
     cli_cmd=(python3 "$HOME/Documents/projects/os-security-ai/gate/gate.py")
 else
-    emit_error "CLI KimRity Gate tidak dijumpai (tetapkan KIMRITY_GATE_CLI)"
+    emit_error "KimRity Gate CLI not found (set KIMRITY_GATE_CLI)"
 fi
 
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 out="$HOME/.local/share/kimrity/gate/$ts"
-mkdir -p "$out" || emit_error "tidak dapat mencipta folder keluaran: $out"
+mkdir -p "$out" || emit_error "cannot create the output folder: $out"
 
-# CLI (trivy) cari config dalam CWD; CWD warisan boleh jadi /root → "permission denied".
-# Jalankan dari $HOME dan pastikan sasaran repo ialah laluan mutlak.
+# The CLI (trivy) looks for its config in CWD; an inherited CWD can be /root
+# -> "permission denied". Run from $HOME and make sure a repo target is an
+# absolute path.
 if [ "$kind" = "repo" ]; then
     target="$(readlink -f "$target" 2>/dev/null || printf '%s' "$target")"
 fi
@@ -71,9 +72,9 @@ if [ "$auth" = "authorized" ]; then
     cli_args+=(--authorized)
 fi
 
-# Baris `[gate] <nama> ...` daripada CLI menandakan scanner bermula. Scanner
-# sebelumnya dianggap selesai; status gagal yang sebenar dibetulkan selepas
-# gate.json dibaca.
+# A `[gate] <name> ...` line from the CLI means a scanner started. The
+# previous scanner is considered finished; a real failed status is corrected
+# after gate.json is read.
 prev=""
 "${cli_cmd[@]}" "${cli_args[@]}" "$target" 2>"$err_path" | while IFS= read -r line; do
     printf '%s\n' "$line" >>"$log_path"
@@ -106,13 +107,13 @@ try:
 except OSError:
     lines = []
 
-reason = lines[-1] if lines else "CLI gagal tanpa output (rc=%s)" % sys.argv[2]
+reason = lines[-1] if lines else "CLI failed with no output (rc=%s)" % sys.argv[2]
 print(json.dumps({"phase": "error", "message": reason[:300]}))
 PY
     exit 2
 fi
 
-# Status scanner + keputusan akhir: semuanya daripada gate.json sebenar.
+# Scanner statuses + final verdict: everything comes from the real gate.json.
 python3 - "$json_path" "$out" <<'PY'
 import json
 import sys
@@ -121,8 +122,8 @@ path, out = sys.argv[1], sys.argv[2]
 try:
     with open(path, encoding="utf-8") as fh:
         result = json.load(fh)
-except Exception as exc:  # noqa: BLE001 - laporkan, jangan teka
-    print(json.dumps({"phase": "error", "message": "gate.json tidak sah: %s" % exc}))
+except Exception as exc:  # noqa: BLE001 - report it, do not guess
+    print(json.dumps({"phase": "error", "message": "invalid gate.json: %s" % exc}))
     raise SystemExit(2)
 
 errors = result.get("tool_errors") or {}
@@ -133,7 +134,7 @@ for name in names:
     row = {"phase": "scanner", "name": name, "status": status}
     if status == "failed":
         reason = str(errors.get(name, "")).splitlines()
-        row["reason"] = (reason[0] if reason else "gagal")[:300]
+        row["reason"] = (reason[0] if reason else "failed")[:300]
     print(json.dumps(row), flush=True)
 
 counts = result.get("counts") or {}

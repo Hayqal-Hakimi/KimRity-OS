@@ -1,78 +1,79 @@
-# KimRity Security Gate — v2 (repo · web · server)
+# KimRity Security Gate — v2 (code repo · web · server)
 
-Satu tool yang **memakai tool lain** untuk menyemak sesuatu projek dan
-mengeluarkan keputusan **LULUS / LULUS BERSYARAT / TIDAK LULUS**.
+One tool that **uses other tools** to check a target and produce a
+**PASS / CONDITIONAL / FAIL** decision.
 
-Model AI **tidak** terlibat dalam keputusan. Verdict datang daripada
-severity yang dilaporkan tool, mengikut peraturan dalam `gate.py`.
+No AI model is involved in the decision. The verdict comes from the
+severity reported by the tools, following the rules in `gate.py`.
 
-## Guna
+## Use
 
 ```sh
-python3 gate.py <sasaran> [--kind repo|web|server] [--scope FAIL] [--authorized] \
+python3 gate.py <target> [--kind repo|web|server] [--scope FILE] [--authorized] \
                 [--out DIR] [--fail-on critical|high|medium] [--quiet]
 ```
 
-Lalai: `--out gate-out`, `--fail-on high`. Jenis diteka jika `--kind` tiada
-(folder → repo · URL → web · host/IP → server).
+Defaults: `--out gate-out`, `--fail-on high`. The kind is guessed when
+`--kind` is absent (folder → repo · URL → web · host/IP → server).
 
-**Guard:** imbasan web/server **wajib** `--authorized` (kau sahkan kau ada
-kebenaran menyasar). Jika `--scope fail` diberi, sasaran mesti ada dalam fail
-itu (satu sasaran/CIDR setiap baris, `#` untuk komen) — sepadan §4.7 draf.
+**Guard:** web/server scans **require** `--authorized` (you confirm you are
+authorized to scan the target). If `--scope FILE` is given, the target must
+be listed in that file (one target/CIDR per line, `#` for comments) —
+matching §4.7 of the draft.
 
-## Alat yang dijalankan
+## Tools run
 
-| Jenis | Alat | Cari |
+| Kind | Tool | Looks for |
 |---|---|---|
-| **repo** | `gitleaks` | rahsia dalam kod + sejarah git (sentiasa `high`) |
-| | `semgrep --config p/default` | corak kod tak selamat (ikut severity semgrep) |
-| | `trivy fs` | CVE pakej, secret, misconfig (ikut severity trivy) |
-| **web** | `nuclei` | CVE/pendedahan template (severity nuclei) |
-| | `nikto` | salah konfigurasi pelayan web (medium; header cadangan = low) |
-| **server** | `nmap -sV -sC` | port terdedah (jadual risiko) + algoritma SSH/TLS lemah |
-| | `ssh-audit` | hanya jika port 22 terbuka |
+| **repo** | `gitleaks` | secrets in code + git history (always `high`) |
+| | `semgrep --config p/default` | unsafe code patterns (follows semgrep severity) |
+| | `trivy fs` | package CVEs, secrets, misconfigs (follows trivy severity) |
+| **web** | `nuclei` | CVE/exposure templates (nuclei severity) |
+| | `nikto` | web server misconfiguration (medium; suggested header = low) |
+| **server** | `nmap -sV -sC` | exposed ports (risk table) + weak SSH/TLS algorithms |
+| | `ssh-audit` | only if port 22 is open |
 
-**Pelarasan ssh-audit (sengaja, didokumen):**
-- `suspected as being backdoored` (kiraan NIST curve) → **low** — pendapat alat, bukan kerosakan
-- `post-quantum` → **info** — anjuran masa depan
-- `[fail]` lain (`broken SHA-1` dsb.) → **high**; `[warn]` lain → **medium**
+**ssh-audit tuning (intentional, documented):**
+- `suspected as being backdoored` (NIST curve count) → **low** — an opinion of the tool, not breakage
+- `post-quantum` → **info** — future-proofing advice
+- other `[fail]` items (`broken SHA-1` etc.) → **high**; other `[warn]` → **medium**
 
-**Jadual risiko port nmap:** 23/445/512-514/1433/3306/5432/6379/9200/27017 → high ·
+**nmap port risk table:** 23/445/512-514/1433/3306/5432/6379/9200/27017 → high ·
 21/3389/5900 → medium · 111 → low.
 
-Semua tiga mesti ada. Tool gagal = **tiada bukti = TIDAK LULUS**.
+All three tools must produce output. A failed tool = **no evidence = FAIL**.
 
-## Peraturan verdict
+## Verdict rules
 
-- ada isu ≥ `--fail-on` (lalai `high`) → **TIDAK LULUS** (exit 1)
-- tiada high, tetapi ada `medium` → **LULUS BERSYARAT** (exit 0)
-- tiada isu → **LULUS** (exit 0)
+- an issue ≥ `--fail-on` (default `high`) → **FAIL** (exit 1)
+- no high, but `medium` exists → **CONDITIONAL** (exit 0)
+- nothing → **PASS** (exit 0)
 
-## Keluaran
+## Output
 
-- `gate-out/gate.json` — bukti penuh: versi tool, commit, semua findings, verdict
-- `gate-out/laporan.md` — ringkasan untuk manusia (Bahasa Melayu)
+- `gate-out/gate.json` — full evidence: tool versions, commit, all findings, verdict
+- `gate-out/report.md` — human-readable summary
 
-## Ujian yang sudah dijalankan
+## Tests already run
 
-| Jenis | Sasaran ujian | Verdict | Findings |
+| Kind | Test target | Verdict | Findings |
 |---|---|---|---|
-| repo | Kunci AWS rawak + SQLi + `flask==0.5` | TIDAK LULUS | 18 (11 high, 6 medium, 1 low) |
-| repo | `os-security-ai` (bersih) | LULUS | 0 |
-| web | `http://127.0.0.1:8080` (`.git/config` terdedah) | LULUS BERSYARAT | 9 (4 medium, 5 low) — nuclei kesan `.git/config` |
-| server | `127.0.0.1` (listener 3306 palsu + sshd) | TIDAK LULUS | 24 (3 high: port 3306, 2× hmac-sha1) |
-| guard | web/server tanpa `--authorized` | ditolak, exit 1 | — |
-| guard | sasaran luar `--scope` | ditolak, exit 1 | — |
-| guard | sasaran dalam `--scope` | diterima | — |
+| repo | Random AWS key + SQLi + `flask==0.5` | FAIL | 18 (11 high, 6 medium, 1 low) |
+| repo | `os-security-ai` (clean) | PASS | 0 |
+| web | `http://127.0.0.1:8080` (exposed `.git/config`) | CONDITIONAL | 9 (4 medium, 5 low) — nuclei found `.git/config` |
+| server | `127.0.0.1` (fake 3306 listener + sshd) | FAIL | 24 (3 high: port 3306, 2× hmac-sha1) |
+| guard | web/server without `--authorized` | rejected, exit 1 | — |
+| guard | target outside `--scope` | rejected, exit 1 | — |
+| guard | target inside `--scope` | accepted | — |
 
-Pengesanan silang: kunci AWS dikesan oleh **gitleaks**, **semgrep** dan
-**trivy** secara berasingan — tiga enjin bebas, bukan satu.
+Cross-check: the AWS key was found by **gitleaks**, **semgrep** and
+**trivy** independently — three separate engines, not one.
 
-## Had v2
+## v2 limits
 
-- Belum ada baseline (isu lama yang diterima) — semua isu dikira setiap kali
-- `semgrep p/default`, `trivy` dan `nuclei` perlukan rangkaian kali pertama (rule/DB)
-- Laporan belum ditandatangani/disahkan hash
-- `nuclei` penuh (13,619 template) ambil beberapa minit setiap imbasan
-- Server: hanya `--top-ports 1000` (bukan 65,535)
-- Web: `nikto` had 10 minit
+- No baseline (accepted old issues) yet — all issues are counted every time
+- `semgrep p/default`, `trivy` and `nuclei` need a network on first run (rules/DB)
+- Reports are not signed/hash-verified yet
+- Full `nuclei` (13,619 templates) takes a few minutes per scan
+- Server: only `--top-ports 1000` (not 65,535)
+- Web: `nikto` is capped at 10 minutes

@@ -1,10 +1,10 @@
-# Profil ISO KimRity (archiso)
+# KimRity ISO profile (archiso)
 
 ```
 iso/
-├── profiledef.sh          nama/label/versi, bootmodes, file_permissions
-├── pacman.conf            WAJIB — mkarchiso guna ini untuk bina airootfs
-├── packages.x86_64        pakej live environment
+├── profiledef.sh          name/label/version, bootmodes, file_permissions
+├── pacman.conf            REQUIRED — mkarchiso uses it to build airootfs
+├── packages.x86_64        live environment packages
 ├── efiboot/
 │   └── loader/
 │       ├── loader.conf            timeout, default entry
@@ -12,34 +12,40 @@ iso/
 └── airootfs/
     ├── etc/os-release     NAME="KimRity", ID=kimrity
     ├── etc/motd
-    └── root/              dibawa masuk ke live ISO:
-        ├── install.sh     pemasang (10 langkah, termasuk arsenal)
+    └── root/              carried into the live ISO:
+        ├── install.sh     installer (10 steps, includes the arsenal)
         ├── dotfiles/      Hyprland, waybar, kitty
         ├── hardening/     audit rules, sysctl, sshd
-        ├── lab/           rule + laporan artifak
+        ├── lab/           artifact rule + reports
         ├── gate/          Security Gate (gate.py + README)
         └── tools/         arsenal.list, arsenal-ai.list, setup-blackarch.sh
 ```
 
-## Bina
+## Build
 
 ```sh
 mkarchiso -v -w /var/tmp/kimrity-work -o ~/iso ~/kimrity-profile
 ```
 
-## Perkara yang WAJIB (kalau tiada, mkarchiso gagal)
+## Things that are REQUIRED (without them, mkarchiso fails)
 
-1. **`pacman.conf`** di akar profil — ralat: `File '…/pacman.conf' does not exist`.
-2. **`efiboot/loader/entries/`** bila `bootmodes=('uefi.systemd-boot')` —
-   ralat: `The '…/efiboot/loader/entries' directory is missing`.
-   Placeholder dalam entry: `%ARCH%`, `%INSTALL_DIR%`, `%ARCHISO_UUID%`, `%KERNEL_PARAMS%`.
-3. **`file_permissions` hanya untuk fail yang WUJUD** dalam airootfs —
-   menyenaraikan fail yang tiada memberi ralat
-   `Failed to set permissions on '…': Outside of valid path` dan binaan berhenti.
+1. **`pacman.conf`** at the profile root — error: `File '…/pacman.conf' does not exist`.
+2. **`efiboot/loader/entries/`** when `bootmodes=('uefi.systemd-boot')` —
+   error: `The '…/efiboot/loader/entries' directory is missing`.
+   Placeholders in the entry: `%ARCH%`, `%INSTALL_DIR%`, `%ARCHISO_UUID%`, `%KERNEL_PARAMS%`.
+3. **`file_permissions` entries must resolve in the built airootfs** —
+   paths created by packages during pacstrap (e.g. `/etc/shadow`,
+   `/etc/gshadow`) may be listed even though they don't exist in the
+   profile tree. Listing a path that never appears in the built tree
+   fails: `Failed to set permissions on '…': Outside of valid path`
+   and the build stops.
+   (Verified 30 Oct, archiso 91: the build passed although
+   `/etc/shadow` and `/etc/gshadow` are absent from the profile —
+   they are created by the `filesystem` package during pacstrap.)
 
-## Dalam ISO (live)
+## Inside the ISO (live)
 
-`install.sh` boleh dijalankan terus dari live environment. Langkah 10/10
-menambah repo BlackArch (kunci + mirrorlist) dan memasang `tools/arsenal.list`
-(24 pakej teras) + `gate.py` → `/usr/local/bin/kimrity-gate`.
-`--ai` menambah `tools/arsenal-ai.list` (berat: garak 6.4 GB, promptfoo 1.7 GB).
+`install.sh` can be run directly from the live environment. Step 10/10
+adds the BlackArch repo (key + mirrorlist) and installs `tools/arsenal.list`
+(24 core packages) + `gate.py` → `/usr/local/bin/kimrity-gate`.
+`--ai` adds `tools/arsenal-ai.list` (heavy: garak 6.4 GB, promptfoo 1.7 GB).

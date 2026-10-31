@@ -1,5 +1,5 @@
-## KimRity — pakej dalam ISO (live + pemasang)
-## Desktop/tool dipasang oleh install.sh dari mirror, bukan dibawa dalam squashfs.
+## KimRity — packages inside the ISO (live + installer)
+## Desktop/tools are installed by install.sh from mirrors, not carried in the squashfs.
 
 base
 linux

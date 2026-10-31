@@ -1,5 +1,5 @@
 #!/bin/sh
-# menu-toggle — buka/tutup menu Quickshell (hidupkan daemon jika belum).
+# menu-toggle — open/close the Quickshell menu (start the daemon if needed).
 if qs ipc -c kimrity call menu toggle >/dev/null 2>&1; then
     exit 0
 fi

@@ -1,29 +1,29 @@
 #!/usr/bin/env bash
-# kimrity-apps — senarai aplikasi pelancar + laluan ikon SEBENAR (bukan huruf).
+# kimrity-apps — launcher app list + REAL icon paths (not letters).
 #
-# Output: TSV ke stdout, satu baris setiap app, tiada tajuk:
+# Output: TSV to stdout, one line per app, no header:
 #   name<TAB>iconpath<TAB>cmd<TAB>cat<TAB>id
 #
-#   name     nama paparan (cth. Firefox)
-#   iconpath laluan mutlak png/svg/xpm, atau `--` jika tiada
-#   cmd      arahan pelancaran (boleh ada ruang dan petikan)
+#   name     display name (e.g. Firefox)
+#   iconpath absolute png/svg/xpm path, or `--` when none
+#   cmd      launch command (may contain spaces and quotes)
 #   cat      0 Apps, 1 Browser, 2 Security, 3 Virtual, 4 System
-#   id       slug huruf kecil (firefox, nmap, wireshark …)
+#   id       lowercase slug (firefox, nmap, wireshark …)
 #
-# App yang binari-nya tiada dalam PATH akan DILANGKAU (bukan dihantar
-# dengan arahan mati).
+# Apps whose binary is not in PATH are SKIPPED (not emitted with a dead
+# command).
 #
-# Tertib carian ikon, yang pertama dijumpai menang:
+# Icon search order, first match wins:
 #   1. $HOME/.local/share/kimrity/icons/<id>.{png,svg,xpm}
-#   2. .desktop (Exec token pertama == binari) -> Icon=, kemudian tema
+#   2. .desktop (first Exec token == binary) -> Icon=, then the theme
 #      hicolor / pixmaps
 #   3. /usr/share/icons/hicolor/{256,128,64,48}-x*/apps + scalable/apps
-#   4. /usr/share/pixmaps/<icon>.* dan /usr/share/icons/*/*/apps/<icon>.*
+#   4. /usr/share/pixmaps/<icon>.* and /usr/share/icons/*/*/apps/<icon>.*
 #   5. `--`
 #
-# Cache: ${XDG_CACHE_HOME:-$HOME/.cache}/kimrity/apps.tsv (TTL 1 hari).
-# `--refresh` memaksa bina semula. Tiada rangkaian. Tiada tulisan lain
-# selain fail cache.
+# Cache: ${XDG_CACHE_HOME:-$HOME/.cache}/kimrity/apps.tsv (TTL 1 day).
+# `--refresh` forces a rebuild. No network. Nothing else is written
+# besides the cache file.
 set -u
 
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/kimrity"
@@ -34,18 +34,18 @@ case "${1:-}" in
     --refresh) refresh=1 ;;
 esac
 
-# ---- cache: guna semula jika belum basi (1 hari) ----
+# ---- cache: reuse while it is not stale (1 day) ----
 if [ "$refresh" -eq 0 ] && [ -s "$cache" ]; then
     mtime=$(stat -c %Y -- "$cache" 2>/dev/null) || mtime=0
-    umur=$(( $(date +%s) - mtime ))
-    if [ "$umur" -lt 86400 ]; then
+    age=$(( $(date +%s) - mtime ))
+    if [ "$age" -lt 86400 ]; then
         cat -- "$cache"
         exit 0
     fi
 fi
 
-# ---- pembantu carian ikon (logik sama seperti kimrity-icons) ----
-# Tema hicolor mengikut tertib yang ditetapkan, kemudian pixmaps.
+# ---- icon lookup helpers (same logic as kimrity-icons) ----
+# hicolor theme in the fixed order, then pixmaps.
 theme_icon() {
     local name=$1 dir ext
     for dir in \
@@ -71,13 +71,13 @@ theme_icon() {
     return 1
 }
 
-# Nilai Icon= boleh jadi laluan mutlak, nama fail, atau nama tema.
+# The Icon= value can be an absolute path, a file name, or a theme name.
 resolve_icon_value() {
     local icon=$1 name
     icon=${icon%\"}; icon=${icon#\"}
     icon=${icon%\'}; icon=${icon#\'}
-    icon=${icon%"${icon##*[![:space:]]}"}   # buang ruang di hujung
-    icon=${icon#"${icon%%[![:space:]]*}"}   # buang ruang di hadapan
+    icon=${icon%"${icon##*[![:space:]]}"}   # trim trailing whitespace
+    icon=${icon#"${icon%%[![:space:]]*}"}   # trim leading whitespace
     [ -n "$icon" ] || return 1
 
     case "$icon" in
@@ -97,14 +97,14 @@ resolve_icon_value() {
     theme_icon "$name"
 }
 
-# Cari .desktop yang Exec token pertamanya (basename) sama dengan binari.
+# Find the .desktop whose first Exec token (basename) equals the binary.
 desktop_icon() {
     local bin=$1 dir f entry exec first icon
     for dir in /usr/share/applications "$HOME/.local/share/applications"; do
         [ -d "$dir" ] || continue
         for f in "$dir"/*.desktop; do
             [ -f "$f" ] || continue
-            # Baca Exec= dan Icon= daripada kumpulan [Desktop Entry] sahaja.
+            # Read Exec= and Icon= from the [Desktop Entry] group only.
             entry=$(awk '
                 /^\[/ { grp = $0; next }
                 grp == "[Desktop Entry]" && /^Exec=/ && !e { e = substr($0, 6) }
@@ -126,7 +126,7 @@ desktop_icon() {
     return 1
 }
 
-# Cari fail bernama <nama>.* dalam pixmaps, kemudian semua tema/saiz.
+# Look for a file named <name>.* in pixmaps, then all themes/sizes.
 named_icon() {
     local name=$1 f size
     for f in /usr/share/pixmaps/"$name".*; do
@@ -135,7 +135,7 @@ named_icon() {
             *.png|*.svg|*.xpm) printf '%s' "$f"; return 0 ;;
         esac
     done
-    # Utamakan saiz besar supaya ikon jelas dalam panel.
+    # Prefer larger sizes so the icon is clear in the panel.
     for size in 256x256 128x128 64x64 48x48 32x32 24x24 22x22 scalable 16x16; do
         for f in /usr/share/icons/*/"$size"/apps/"$name".*; do
             [ -f "$f" ] || continue
@@ -147,10 +147,10 @@ named_icon() {
     return 1
 }
 
-# id untuk ikon milik pengguna, binari untuk .desktop dan nama fail.
+# id for user-owned icons, binary for .desktop and file names.
 resolve_icon() {
     local id=$1 bin=$2 path ext
-    # 1. ikon milik pengguna sentiasa menang
+    # 1. user-owned icons always win
     for ext in png svg xpm; do
         path="$HOME/.local/share/kimrity/icons/$id.$ext"
         if [ -f "$path" ]; then
@@ -160,12 +160,12 @@ resolve_icon() {
     done
     # 2. desktop entry
     desktop_icon "$bin" && return 0
-    # 3. nama fail terus (pixmaps + tema)
+    # 3. direct file name (pixmaps + theme)
     named_icon "$bin" && return 0
     return 1
 }
 
-# ---- jadual app: name|binari|cmd|cat|id (tertib dikekalkan) ----
+# ---- app table: name|binary|cmd|cat|id (order preserved) ----
 apps=$(cat <<'EOF'
 Firefox|firefox|firefox|1|firefox
 nmap|nmap|kitty -e bash -lc 'nmap; exec bash'|2|nmap
@@ -182,7 +182,7 @@ radare2|radare2|kitty -e r2 -|2|radare2
 EOF
 )
 
-# ---- bina output, langkau binari yang tiada ----
+# ---- build the output, skip missing binaries ----
 out=""
 while IFS='|' read -r name bin cmd cat id; do
     [ -n "${id:-}" ] || continue
@@ -195,7 +195,7 @@ while IFS='|' read -r name bin cmd cat id; do
     fi
 done <<< "$apps"
 
-# ---- tulis cache secara atomik, kemudian cetak ----
+# ---- write the cache atomically, then print ----
 if mkdir -p "$cache_dir" 2>/dev/null; then
     tmp="$cache.tmp.$$"
     if printf '%s' "$out" > "$tmp" 2>/dev/null && mv -f -- "$tmp" "$cache" 2>/dev/null; then

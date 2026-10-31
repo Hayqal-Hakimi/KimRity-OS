@@ -1,8 +1,8 @@
 #!/bin/sh
-# Ujian Gate v2: web + server, sasaran = VM sendiri (127.0.0.1).
-# Menyediakan:
-#   - pelayan HTTP 8080 dengan .git/config terdedah  → ujian nuclei/nikto
-#   - listener palsu pada 3306                        → ujian polisi port nmap
+# Gate v2 test: web + server, target = the VM itself (127.0.0.1).
+# Provides:
+#   - an HTTP 8080 server with a exposed .git/config  → nuclei/nikto test
+#   - a fake listener on 3306                         → nmap port policy test
 set -u
 GATE=/opt/kimrity/gate/gate.py
 pkill -f "http.server 8080" 2>/dev/null
@@ -29,20 +29,20 @@ while True:
 sleep 2
 ss -ltn | grep -E ':8080|:3306'
 
-echo "=================== UJIAN A: WEB ==================="
+echo "=================== TEST A: WEB ==================="
 python3 "$GATE" http://127.0.0.1:8080 --kind web --authorized --out /root/webtest/out-web 2>&1 | tail -4
-sed -n '1,26p' /root/webtest/out-web/laporan.md
+sed -n '1,26p' /root/webtest/out-web/report.md
 
-echo "=================== UJIAN B: SERVER ==================="
+echo "=================== TEST B: SERVER ==================="
 python3 "$GATE" 127.0.0.1 --kind server --authorized --out /root/webtest/out-srv 2>&1 | tail -4
-sed -n '1,26p' /root/webtest/out-srv/laporan.md
+sed -n '1,26p' /root/webtest/out-srv/report.md
 
-echo "=================== UJIAN C: GUARD ==================="
-echo "-- C1: web/server tanpa --authorized (mesti ditolak)"
+echo "=================== TEST C: GUARD ==================="
+echo "-- C1: web/server without --authorized (must be rejected)"
 python3 "$GATE" 127.0.0.1 --kind server --out /tmp/g1 >/tmp/g1.log 2>&1; echo "exit=$?"; tail -1 /tmp/g1.log
-echo "-- C2: sasaran luar fail skop (mesti ditolak)"
+echo "-- C2: target outside the scope file (must be rejected)"
 echo "allowed.example.com" > /tmp/scope.txt
 python3 "$GATE" 127.0.0.1 --kind server --authorized --scope /tmp/scope.txt --out /tmp/g2 >/tmp/g2.log 2>&1; echo "exit=$?"; tail -1 /tmp/g2.log
-echo "-- C3: sasaran DALAM fail skop (mesti diterima)"
+echo "-- C3: target INSIDE the scope file (must be accepted)"
 printf "127.0.0.1\n192.168.1.0/24\n" > /tmp/scope2.txt
 python3 "$GATE" 127.0.0.1 --kind server --authorized --scope /tmp/scope2.txt --out /tmp/g3 --quiet >/tmp/g3.log 2>&1; echo "exit=$?"; tail -2 /tmp/g3.log

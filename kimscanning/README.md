@@ -1,187 +1,216 @@
 # KimScanning v1
 
-KimScanning ialah alat baris perintah gaya `nmap` yang membalut
-[`gate/gate.py`](../gate/gate.py). Setiap imbasan disimpan sebagai **objek
-sesi**, setiap dapatan dijelaskan dalam **Bahasa Melayu menggunakan kamus
-statik** (`rules/bm.yaml`), dan status dapatan dikekalkan merentas imbasan
-berulang. Tiada AI, tiada panggilan rangkaian daripada KimScanning sendiri.
+KimScanning is a command-line tool in the style of `nmap` that wraps
+[`gate/gate.py`](../gate/gate.py). Every scan is stored as a **session
+object**, every finding is explained in **English from a static dictionary**
+(`rules/en.yaml`), and finding statuses are kept consistent across repeated
+scans. No AI, no network calls made by KimScanning itself.
 
-KimScanning tidak membuat verdict sendiri: verdict datang daripada
-KimRity Security Gate. Jika alat pengimbas tiada atau gagal, gate tidak
-memberi kelulusan dan KimScanning merekodkannya secara jujur.
+KimScanning does not produce its own verdict: the verdict comes from the
+KimRity Security Gate. If a scanner tool is missing or fails, the gate does
+not approve and KimScanning records that honestly.
 
-## Keperluan
+## Requirements
 
-- Python 3 (hanya pustaka standard; PyYAML digunakan jika ada, jika tidak
-  parser kecil terbina digunakan).
-- `gate/gate.py` dalam repositori yang sama.
-- Alat pengimbas pada `PATH`:
+- Python 3 (standard library only; PyYAML is used if present, otherwise a
+  small built-in parser is used).
+- `gate/gate.py` in the same repository.
+- Scanner tools on `PATH`:
   - `repo`: `gitleaks`, `semgrep`, `trivy`
+  - `file`: `gitleaks`, `semgrep`, `trivy`; metadata from `file` and
+    `sha256sum`. Binary files additionally try `clamscan` and `yara` if
+    available.
+  - `installer`: `.sh`, `.deb`, `.rpm`, `.AppImage`, `.run`, `.bin`, `.exe`,
+    or `PKGBUILD`; uses the same checks as `file`.
   - `web`: `nuclei`, `nikto`
-  - `server`: `nmap`, `ssh-audit` (ssh-audit hanya jika port 22 dibuka)
-- `kimscan doctor` menyemak setiap alat dengan `command -v` ( melalui
-  `shutil.which`) dan melaporkan yang tiada sebagai **tiada**. Ia tidak
-  pernah menganggap alat yang tidak dipasang sebagai tersedia.
+  - `server`: `nmap`, `ssh-audit` (ssh-audit only if port 22 is open)
+- `kimscan doctor` checks each tool with `command -v` (via `shutil.which`)
+  and reports missing tools as **absent**. It never treats an uninstalled
+  tool as present.
 
-## Penggunaan
+## Usage
 
 ```text
 kimscan repo <folder> [--scope S] [--json] [--fail-on critical|high|medium]
+kimscan file <path> [--json] [--fail-on critical|high|medium]
+kimscan installer <path> [--json] [--fail-on critical|high|medium]
 kimscan web <url> --authorized [--scope S] [--json] [--fail-on T]
 kimscan server <host> --authorized [--scope S] [--json] [--fail-on T]
 kimscan list
 kimscan show <id> [--json]
-kimscan status <id> <fp> baru|diterima|dibetulkan
+kimscan status <id> <fp> new|accepted|fixed
 kimscan rules [--missing]
 kimscan doctor
 kimscan help
 ```
 
-Contoh:
+Examples:
 
 ```bash
 ./kimscanning/kimscan doctor
 ./kimscanning/kimscan repo .
-./kimscanning/kimscan repo ~/projek --fail-on medium
-./kimscanning/kimscan web https://127.0.0.1 --authorized --scope skop.txt
+./kimscanning/kimscan repo ~/project --fail-on medium
+./kimscanning/kimscan file ./settings.py
+./kimscanning/kimscan installer ./install.sh
+./kimscanning/kimscan web https://127.0.0.1 --authorized --scope scope.txt
 ./kimscanning/kimscan show 20261028T120000Z
-./kimscanning/kimscan status 20261028T120000Z a1b2c3d4e5f6 diterima
+./kimscanning/kimscan status 20261028T120000Z a1b2c3d4e5f6 accepted
 ./kimscanning/kimscan rules --missing
 ```
 
-`web` dan `server` ialah imbasan aktif. Kedua-duanya **enggan berjalan**
-tanpa `--authorized` dan keluar dengan kod 1. Pengguna bertanggungjawab
-memastikan kebenaran bertulis sebelum menggunakan flag itu.
+`web` and `server` are active scans. Both **refuse to run** without
+`--authorized` and exit with code 1. The user is responsible for making sure
+written authorization exists before using that flag.
 
-### NDJSON untuk GUI
+### Single files and installers
 
-Dengan `--json`, stdout hanya mengandungi satu objek JSON setiap baris:
+`gate.py` only accepts a repo/folder for `repo` mode; it cannot take a
+single file directly. For `file` and `installer`, KimScanning copies the
+file to a temporary directory containing just that one file, scans it via
+the Gate's `repo` mode, then deletes the temporary directory. The target
+and `file_path` in the session remain the original file path.
+
+Text files still receive a normal Gate scan (`gitleaks`, `semgrep`,
+`trivy`). `file` and `sha256sum` are always recorded when available. For
+binaries or `installer` artifacts, KimScanning also runs `clamscan` when
+present. YARA needs rules; it runs only if `KIMSCAN_YARA_RULES` points to a
+readable rules file. If a tool is missing, its status says
+`available: no` clearly — KimScanning does not invent scan results.
+
+### NDJSON for a GUI
+
+With `--json`, stdout contains only one JSON object per line:
 
 ```json
 {"phase":"start","id":"20261028T120000Z","kind":"repo","target":"/x","started":"..."}
-{"phase":"scanner","name":"gitleaks","status":"done","rc":0,"reason":"selesai"}
-{"phase":"scanner","name":"semgrep","status":"done","rc":0,"reason":"selesai"}
-{"phase":"scanner","name":"trivy","status":"done","rc":0,"reason":"selesai"}
-{"phase":"done","id":"20261028T120000Z","verdict":"LULUS","counts":{...},"exit":0}
+{"phase":"scanner","name":"gitleaks","status":"done","rc":0,"reason":"done"}
+{"phase":"scanner","name":"semgrep","status":"done","rc":0,"reason":"done"}
+{"phase":"done","id":"20261028T120000Z","verdict":"PASS","counts":{...},"exit":0}
 ```
 
-Ralat pengawal dan ralat penggunaan ditulis ke stderr.
+Guard errors and usage errors are written to stderr.
 
-## Kod keluar
+## Exit codes
 
-| Kod | Maksud |
+| Code | Meaning |
 |---:|---|
-| 0 | LULUS |
-| 1 | ralat penggunaan / pengawal kebenaran |
-| 2 | BERSYARAT |
-| 3 | TIDAK LULUS |
+| 0 | PASS |
+| 1 | usage error / authorization guard |
+| 2 | CONDITIONAL |
+| 3 | FAIL |
 
-Verdict gate `LULUS BERSYARAT` dipetakan kepada `BERSYARAT` dalam
-`session.json` supaya tepat mengikut skema sesi.
+The gate verdict `CONDITIONAL` is kept as-is in `session.json` so it exactly
+follows the session schema.
 
-## Sesi
+## Sessions
 
-Lokasi:
+Location:
 
 ```text
 $XDG_DATA_HOME/kimscanning/sessions/<YYYYMMDDTHHMMSSZ>/
 ```
 
-Jika `XDG_DATA_HOME` tidak ditetapkan:
+If `XDG_DATA_HOME` is not set:
 
 ```text
 ~/.local/share/kimscanning/sessions/<YYYYMMDDTHHMMSSZ>/
 ```
 
-Setiap sesi mengandungi:
+Each session contains:
 
-- `session.json` — objek sesi (schema di bawah)
-- `raw/` — keluaran mentah setiap pengimbas, `gate.json`, dan laporan gate
-- `report.md` — laporan manusia dalam Bahasa Melayu
+- `session.json` — the session object (schema below)
+- `raw/` — raw output of each scanner, `gate.json`, and the gate report
+- `report.md` — human report
 
-Skema `session.json`:
+`session.json` schema:
 
 ```text
-id, kind, target (absolut untuk repo), profile,
+id, kind, target (absolute for repo), profile,
 authorized{granted,who,when,scope},
-started, finished, verdict (LULUS|BERSYARAT|TIDAK LULUS),
+started, finished, verdict (PASS|CONDITIONAL|FAIL),
 scanners[{name,status(done|failed|skipped),rc,reason}],
 counts{critical,high,medium,low},
 findings[{fp,tool,rule,severity,file,line,message,evidence,
-          explanation{apa,bahaya,buat} | null,
-          status(baru|diterima|dibetulkan),first_seen,last_seen}]
+          explanation{what,why,fix} | null,
+          status(new|accepted|fixed),first_seen,last_seen}]
 ```
 
-### Cap jari dan status
+Sessions for `file` and `installer` also contain `file_path` (the original
+path), `sha256`, `size_bytes`, and `file_type` (output of `file -b`).
+
+Scans rejected before the scanners run — for example `web` without
+`--authorized` — do not create a session directory. `list` skips corrupted
+session records and `show` reports a clear error, so old broken sessions do
+not make those commands crash.
+
+### Fingerprints and status
 
 ```text
 fp = sha1(tool + "|" + rule + "|" + file + "|" + line)[:12]
 ```
 
-Apabila imbasan baharu bagi `kind+target` yang sama menghasilkan `fp` yang
-pernah dilihat:
+When a new scan of the same `kind+target` produces an `fp` seen before:
 
-- `first_seen` asal dikekalkan;
-- `last_seen` dikemas kini;
-- status asal dikekalkan (tidak ditetapkan semula kepada `baru`).
+- the original `first_seen` is kept;
+- `last_seen` is updated;
+- the original status is kept (it is not reset to `new`).
 
-Status hanya diubah melalui:
+Status is only changed through:
 
 ```bash
-kimscan status <id> <fp> baru|diterima|dibetulkan
+kimscan status <id> <fp> new|accepted|fixed
 ```
 
-Perubahan status direkodkan dalam sesi itu dan dalam ledger kecil
-`$XDG_DATA_HOME/kimscanning/status.json` supaya imbasan seterusnya bagi
-`kind+target+fp` yang sama menggunakan status terkini, walaupun status
-ditetapkan pada sesi yang lebih lama. Ledger ini juga membolehkan status
-ditukar kembali kepada `baru`.
+Status changes are recorded in the session and in a small ledger at
+`$XDG_DATA_HOME/kimscanning/status.json` so the next scan of the same
+`kind+target+fp` uses the latest status, even if it was set in an older
+session. The ledger also lets a status be changed back to `new`.
 
-## Kamus rule (tanpa AI)
+## Rule dictionary (no AI)
 
-`rules/bm.yaml` memetakan `tool` + `rule` kepada tiga medan Bahasa Melayu:
+`rules/en.yaml` maps `tool` + `rule` to three English fields:
 
-- `apa` — apa yang dikesan;
-- `bahaya` — mengapa ia berbahaya;
-- `buat` — tindakan pembaikan.
+- `what` — what was detected;
+- `why` — why it is dangerous;
+- `fix` — the remediation action.
 
-Semua id dalam kamus disalin daripada keluaran sebenar gitleaks, semgrep,
-dan trivy melalui `gate/gate.py`. Tiada id rekaan.
+All ids in the dictionary were copied from real gitleaks, semgrep, and
+trivy output via `gate/gate.py`. No invented ids.
 
-Jika rule tidak ada dalam kamus:
+If a rule is not in the dictionary:
 
-- `session.json` menyimpan `"explanation": null`;
-- CLI memaparkan `[tiada penjelasan]`;
-- `kimscan rules --missing` menyenaraikan `tool/rule` yang dilihat dalam
-  sesi tetapi tiada dalam kamus, berserta bilangan dapatan dan sesi.
+- `session.json` stores `"explanation": null`;
+- the CLI shows `[no explanation]`;
+- `kimscan rules --missing` lists `tool/rule` pairs seen in sessions but
+  missing from the dictionary, with finding and session counts.
 
-`kimscan rules` tanpa flag menyenaraikan semua entri kamus.
+`kimscan rules` without a flag lists every dictionary entry.
 
-## Ujian
+## Tests
 
-Ujian menggunakan `HOME` dan `XDG_DATA_HOME` sementara supaya konfigurasi
-sebenar tidak disentuh:
+Tests use temp `HOME` and `XDG_DATA_HOME` so real configuration is not
+touched:
 
 ```bash
 bash kimscanning/test/run_tests.sh
 ```
 
-Ujian membuat folder bersih dan folder bocor di bawah direktori sementara,
-menjana kunci gaya AWS secara rawak dengan `tr -dc 'A-Z2-7'`, kemudian
-menguji verdict, kod keluar, sesi, penjelasan, status carry-over, penolakan
-web tanpa kebenaran, `rules --missing`, dan `doctor`.
+The tests create clean and leaking folders under a temp directory, generate
+random AWS-style keys with `tr -dc 'A-Z2-7'`, and then check verdicts, exit
+codes, sessions, explanations, status carry-over, rejection of `web` without
+authorization, `rules --missing`, and `doctor`.
 
-Untuk menjalankan ujian dengan alat dari direktori sementara:
+To run the tests with tools from a temp directory:
 
 ```bash
 PATH=/tmp/opencode/bin:$PATH bash kimscanning/test/run_tests.sh
 ```
 
-## Had v1
+## v1 limits
 
-- Belum ada UI penuh skrin; ini alat baris perintah.
-- Imbasan web/server sebenar memerlukan sasaran yang dibenarkan dan alat
-  `nuclei`/`nikto`/`nmap`/`ssh-audit`. Jika alat tiada, gate akan memberi
-  TIDAK LULUS kerana tiada bukti.
-- KimScanning tidak mencipta rule id, tidak memanggil AI, dan tidak membuat
-  verdict sendiri.
+- No full-screen UI yet; this is a command-line tool.
+- Real `web`/`server` scans require an authorized target and the tools
+  `nuclei`/`nikto`/`nmap`/`ssh-audit`. If a tool is missing, the gate gives
+  FAIL for lack of evidence.
+- KimScanning does not invent rule ids, does not call AI, and does not
+  produce its own verdict.
