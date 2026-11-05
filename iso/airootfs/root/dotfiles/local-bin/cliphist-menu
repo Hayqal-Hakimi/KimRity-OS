@@ -1,6 +1,11 @@
 #!/bin/sh
 # Pick from clipboard history (cliphist) through wofi.
+# Press SUPER+V again = close (wofi is not a window; SUPER+Q cannot kill it).
 set -u
+if pgrep -u "$(id -u)" -x wofi >/dev/null 2>&1; then
+    pkill -u "$(id -u)" -x wofi
+    exit 0
+fi
 sel="$(cliphist list | wofi --dmenu -i -p 'clip')" || exit 0
 [ -n "$sel" ] || exit 0
 printf '%s' "$sel" | cliphist decode | wl-copy

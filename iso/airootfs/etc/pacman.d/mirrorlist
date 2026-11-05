@@ -1,0 +1,12 @@
+##
+## KimRity live ISO mirrorlist
+##
+## Why this file exists: the releng archiso profile generates /etc/pacman.d/mirrorlist
+## at boot via choose-mirror.service + reflector. KimRity does not ship reflector, so
+## without a static list pacstrap fails with "no servers configured for repository".
+## $repo and $arch are expanded by pacman.
+##
+
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
+Server = https://mirror.leaseweb.com/archlinux/$repo/os/$arch

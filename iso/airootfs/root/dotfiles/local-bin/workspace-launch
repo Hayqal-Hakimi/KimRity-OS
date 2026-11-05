@@ -41,7 +41,7 @@ printf '%s\n' "$lines" | while IFS='|' read -r p label ws tool args; do
     if [ "$dry" = 1 ]; then
         printf '%s %-10s [tab %s] %s\n' "$p" "$tool" "$ws" "$cmd"
     else
-        hyprctl dispatch exec "[workspace $ws] $cmd" >/dev/null 2>&1 || \
+        hyprctl dispatch exec "[workspace $ws] env DISPLAY=${DISPLAY:-:0} _JAVA_AWT_WM_NONREPARENTING=1 $cmd" >/dev/null 2>&1 || \
             echo "launch failed: $cmd" >&2
         sleep 0.2
     fi

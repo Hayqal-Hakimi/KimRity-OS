@@ -16,11 +16,6 @@ ShellRoot {
     property int wsIndex: 0
     property string filter: ""
 
-    readonly property var cats: [
-        "Development", "Web & Browser", "Security", "Engineering",
-        "System", "Office", "Multimedia", "Utilities"
-    ]
-
     // Workspace clusters — built from the user's conf (kimrity-ws) and real
     // icons (kimrity-icons). No hardcoded tool/glyph here.
     property var clusters: []
@@ -30,29 +25,21 @@ ShellRoot {
     property bool iconsDone: false
     property bool wsMutating: false
 
-    onIsOpenChanged: if (isOpen) root.refreshClusters()
-    Component.onCompleted: root.refreshClusters()
+    onIsOpenChanged: if (isOpen) {
+        root.refreshClusters()
+        root.refreshNotes()
+        if (root.gatePage) root.refreshGateHistory()
+    }
+    Component.onCompleted: { root.refreshClusters(); root.refreshNotes(); root.loadApps() }
 
-    readonly property var allApps: [
-        { n: "Firefox",    m: "FF", c: "#ff7139", cat: 1, cmd: "firefox" },
-        { n: "nmap",       m: "nm", c: "#b57bff", cat: 2, cmd: "kitty -e bash -lc 'nmap; exec bash'" },
-        { n: "VS Code",    m: "VS", c: "#3aa0ff", cat: 0, cmd: "code" },
-        { n: "Wireshark",  m: "ws", c: "#6ea8fe", cat: 2, cmd: "wireshark" },
-        { n: "Kitty",      m: "›_", c: "#7ee787", cat: 4, cmd: "kitty" },
-        { n: "Burp Suite", m: "bp", c: "#ff8b5e", cat: 2, cmd: "burpsuite" },
-        { n: "btop",       m: "bt", c: "#f5c451", cat: 4, cmd: "kitty -e btop" },
-        { n: "qemu",       m: "qz", c: "#9ad0ff", cat: 3, cmd: "kitty -e bash -lc 'ls ~/vm; exec bash'" },
-        { n: "yazi",       m: "yz", c: "#d6a2ff", cat: 4, cmd: "kitty -e yazi" },
-        { n: "ghidra",     m: "gd", c: "#ff9f6e", cat: 2, cmd: "ghidra" },
-        { n: "metasploit", m: "ms", c: "#ff6b6b", cat: 2, cmd: "kitty -e msfconsole" },
-        { n: "radare2",    m: "r2", c: "#8be9fd", cat: 2, cmd: "kitty -e r2 -" }
-    ]
-
+    // Real applications from kimrity-apps:
+    //   name <TAB> iconpath <TAB> cmd <TAB> cat <TAB> id
+    property var appData: []
+    property bool appsLoaded: false
     readonly property var apps: {
-        let l = allApps
-        if (catIndex >= 0) l = l.filter(a => a.cat === catIndex)
-        if (filter.length > 0) l = l.filter(a => a.n.toLowerCase().includes(filter.toLowerCase()))
-        return l
+        const q = root.filter.trim().toLowerCase()
+        if (q.length === 0) return root.appData
+        return root.appData.filter(a => String(a.name || "").toLowerCase().includes(q))
     }
 
     readonly property var recent: [
@@ -60,13 +47,6 @@ ShellRoot {
         { n: "hyprland.conf",          p: "~/.config/hypr · 20:32" },
         { n: "audit.log",              p: "/var/log/audit · 18:04" },
         { n: "shell.qml",              p: "~/.config/quickshell/kimrity · 19:57" }
-    ]
-
-    readonly property var notes: [
-        "☐ Record the Gate verdict",
-        "☑ 12 audit rules active",
-        "☐ SOC L1 report (day 3)",
-        "☐ Check the SUPER+F1…F3 keybinds"
     ]
 
     // ---------------- preset settings ----------------
@@ -78,6 +58,94 @@ ShellRoot {
     property var toolHits: []
     readonly property string homeDir: Quickshell.env("HOME") || "/home/hayqal"
     readonly property string confPath: homeDir + "/.config/kimrity/workspaces.conf"
+
+    // ---------------- notes ----------------
+    // Notes are stored in JSON and re-read via Process + StdioCollector.
+    property var notes: []
+    property bool notesDone: false
+    property int noteIndex: -1
+    property bool noteEdit: false
+    property bool notesMenuOpen: false
+    property bool pendingNoteEdit: false
+    readonly property string notesPath: homeDir + "/.config/kimrity/notes.json"
+
+    // ---------------- gate ----------------
+    // Gate page: pick a target, run kimrity-gate (NDJSON), read the real
+    // gate.json. No AI analysis in this version.
+    property bool gatePage: false
+    property string gateKind: "repo"
+    property string gateTarget: ""
+    property bool gateAuthorized: false
+    property bool gateRunning: false
+    property bool gateDone: false
+    property string gateVerdict: ""
+    property string gateReason: ""
+    property string gateError: ""
+    property var gateCounts: ({})
+    property var gateFindings: []
+    property var gateScanners: []
+    property var gateToolErrors: ({})
+    property string gateLoadedJson: ""
+    property string gateJsonPending: ""
+    property var gateHistory: []
+    property bool gateHistoryLoading: false
+    property int gateExitCode: 0
+    readonly property string gateHistoryDir: homeDir + "/.local/share/kimrity/gate"
+    readonly property bool gateCanRun: root.gateTarget.trim().length > 0
+        && !root.gateRunning
+        && (root.gateKind === "repo" || root.gateAuthorized)
+
+    // Inline JSON logic: jq if available, python3 otherwise.
+    readonly property string notesScript: `
+set -u
+f="$1"; op="$2"; id="$3"; shift 3 || true; text="$*"
+mkdir -p "$(dirname "$f")"
+[ -s "$f" ] || printf '%s\n' '[]' > "$f"
+if command -v jq >/dev/null 2>&1; then
+  case "$op" in
+    add)
+      tmp=$(mktemp) && jq --arg id "$id" --arg t "$text" '. + [{id:$id, type:"note", text:$t, done:false}]' "$f" > "$tmp" && mv -- "$tmp" "$f" ;;
+    addcheck)
+      tmp=$(mktemp) && jq --arg id "$id" --arg t "$text" '. + [{id:$id, type:"check", text:$t, done:false}]' "$f" > "$tmp" && mv -- "$tmp" "$f" ;;
+    toggle)
+      tmp=$(mktemp) && jq --arg id "$id" 'map(if .id == $id then .done = (.done | not) else . end)' "$f" > "$tmp" && mv -- "$tmp" "$f" ;;
+    edit)
+      tmp=$(mktemp) && jq --arg id "$id" --arg t "$text" 'map(if .id == $id then .text = $t else . end)' "$f" > "$tmp" && mv -- "$tmp" "$f" ;;
+    del)
+      tmp=$(mktemp) && jq --arg id "$id" 'map(select(.id != $id))' "$f" > "$tmp" && mv -- "$tmp" "$f" ;;
+  esac
+  jq -c . "$f" 2>/dev/null || printf '%s\n' '[]'
+else
+  python3 - "$f" "$op" "$id" "$text" <<'PY'
+import json, sys
+f, op, i, t = sys.argv[1:5]
+try:
+    with open(f) as fh:
+        data = json.load(fh)
+except Exception:
+    data = []
+if not isinstance(data, list):
+    data = []
+if op == 'add':
+    data.append({"id": i, "type": "note", "text": t, "done": False})
+elif op == 'addcheck':
+    data.append({"id": i, "type": "check", "text": t, "done": False})
+elif op == 'toggle':
+    for n in data:
+        if n.get('id') == i:
+            n['done'] = not n.get('done', False)
+elif op == 'edit':
+    for n in data:
+        if n.get('id') == i:
+            n['text'] = t
+elif op == 'del':
+    data = [n for n in data if n.get('id') != i]
+with open(f, 'w') as fh:
+    json.dump(data, fh)
+print(json.dumps(data))
+PY
+fi
+`
 
     // Scripts print the full file to stdout; the UI reads from there (no cache).
     Process {
@@ -127,10 +195,172 @@ ShellRoot {
         }
     }
 
+    // Real app list (once only). The script may not exist yet; if there is no
+    // output, the list stays empty without QML errors.
+    Process {
+        id: appsProc
+        stdout: StdioCollector {
+            id: appsOut
+            onStreamFinished: root.appsReady(appsOut.text)
+        }
+    }
+
+    // All note operations re-print the full JSON; same pattern as kimrity-ws.
+    Process {
+        id: notesProc
+        stdout: StdioCollector {
+            id: notesOut
+            onStreamFinished: root.notesReady(notesOut.text)
+        }
+        onExited: if (!root.notesDone) root.notesReady("[]")
+    }
+
+    // Gate: SplitParser reads the NDJSON line by line while the process is
+    // alive so scanner statuses can be updated. gate.json is read separately
+    // via Process + StdioCollector (no FileView cache).
+    Process {
+        id: gateRunProc
+        stdout: SplitParser {
+            onRead: (line) => root.gateLine(line)
+        }
+        onExited: (code, status) => root.gateExited(code)
+    }
+
+    Process {
+        id: gateJsonProc
+        stdout: StdioCollector {
+            id: gateJsonOut
+            onStreamFinished: root.gateJsonReady(gateJsonOut.text)
+        }
+        onExited: {
+            if (gateJsonOut.text.length === 0) root.gateJsonReady("")
+        }
+    }
+
+    Process {
+        id: gateHistoryProc
+        stdout: StdioCollector {
+            id: gateHistoryOut
+            onStreamFinished: root.gateHistoryReady(gateHistoryOut.text)
+        }
+        onExited: if (root.gateHistoryLoading) root.gateHistoryReady("")
+    }
+
+    // Give the last NDJSON line a chance to be processed before assuming the
+    // process ended without a result.
+    Timer {
+        id: gateExitTimer
+        interval: 150
+        repeat: false
+        onTriggered: {
+            if (!root.gateRunning) return
+            root.gateRunning = false
+            if (!root.gateDone && root.gateError === "")
+                root.gateError = "Scan stopped (exit " + root.gateExitCode + ")"
+        }
+    }
+
     function loadTools() {
         if (root.tools.length > 0) return
         toolsProc.command = [root.homeDir + "/.local/bin/kimrity-tools"]
         toolsProc.running = true
+    }
+
+    function loadApps() {
+        if (root.appsLoaded) return
+        root.appsLoaded = true
+        // The script may not exist yet: stay quiet and return empty output.
+        appsProc.command = ["bash", "-lc",
+            "f=\"$1\"; [ -x \"$f\" ] && exec \"$f\" || exit 0",
+            "kimrity-apps", root.homeDir + "/.local/bin/kimrity-apps"]
+        appsProc.running = true
+    }
+
+    function appsReady(t) {
+        const out = []
+        for (const line of (t || "").split("\n")) {
+            if (line.length === 0) continue
+            const p = line.split("\t")
+            if (p.length < 3) continue
+            const name = (p[0] || "").trim()
+            if (name.length === 0) continue
+            let icon = (p[1] || "").trim()
+            if (icon === "--") icon = ""
+            out.push({
+                name: name,
+                icon: icon,
+                cmd: (p[2] || "").trim(),
+                cat: (p[3] || "").trim(),
+                id: (p[4] || "").trim()
+            })
+        }
+        root.appData = out
+    }
+
+    // ---------------- notes ----------------
+    function refreshNotes() {
+        root.notesCall("read", "", "")
+    }
+
+    function notesCall(op, id, text) {
+        root.notesDone = false
+        notesProc.command = ["bash", "-lc", root.notesScript, "kimrity-notes",
+                             root.notesPath, op, id || "", text || ""]
+        notesProc.running = true
+    }
+
+    function notesReady(t) {
+        root.notesDone = true
+        let v = []
+        try {
+            v = JSON.parse((t || "").trim() || "[]")
+        } catch (e) {
+            v = []
+        }
+        root.notes = Array.isArray(v) ? v : []
+        if (root.noteIndex >= root.notes.length) root.noteIndex = root.notes.length - 1
+        if (root.pendingNoteEdit && root.notes.length > 0) {
+            root.pendingNoteEdit = false
+            root.noteIndex = root.notes.length - 1
+            root.noteEdit = true
+        }
+    }
+
+    function addNote(kind) {
+        const id = "n" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7)
+        root.notesMenuOpen = false
+        root.pendingNoteEdit = true
+        root.notesCall(kind === "check" ? "addcheck" : "add", id, "")
+    }
+
+    function toggleNote(id) {
+        root.notesCall("toggle", id, "")
+    }
+
+    function commitNote(id, text) {
+        const s = (text || "").trim()
+        root.noteEdit = false
+        if (s.length === 0) root.notesCall("del", id, "")
+        else root.notesCall("edit", id, s)
+    }
+
+    function deleteNote(id) {
+        root.notesMenuOpen = false
+        root.noteEdit = false
+        root.notesCall("del", id, "")
+    }
+
+    function notesMenuAction(act) {
+        if (act === "note") { root.addNote("note"); return }
+        if (act === "check") { root.addNote("check"); return }
+        const n = root.notes[root.noteIndex]
+        if (!n) { root.notesMenuOpen = false; return }
+        if (act === "edit") {
+            root.notesMenuOpen = false
+            root.noteEdit = true
+        } else if (act === "del") {
+            root.deleteNote(n.id)
+        }
     }
 
     function updateHits(q) {
@@ -141,6 +371,178 @@ ShellRoot {
             if (root.tools[i].toLowerCase().startsWith(s)) out.push(root.tools[i])
         }
         root.toolHits = out
+    }
+
+    // ---------------- gate ----------------
+    function gateCount(name) {
+        const c = root.gateCounts || {}
+        const n = c[name]
+        return typeof n === "number" ? n : 0
+    }
+
+    function gateSevColor(s) {
+        const v = String(s || "").toLowerCase()
+        if (v === "critical" || v === "high") return "#e8443a"
+        if (v === "medium") return "#e0a34a"
+        if (v === "low") return "#5aa9e6"
+        return "#7d8aa8"
+    }
+
+    function gateVerdictColor(v) {
+        const s = String(v || "")
+        if (s === "PASS") return "#3fbf8f"
+        if (s === "CONDITIONAL") return "#e0a34a"
+        if (s === "FAIL") return "#e8443a"
+        return "#5b6784"
+    }
+
+    function gateVerdictLabel(v) {
+        return String(v || "")
+    }
+
+    function gateLocation(f) {
+        if (!f) return ""
+        const file = String(f.file || "?")
+        const line = parseInt(f.line)
+        return isNaN(line) || line <= 0 ? file : file + ":" + line
+    }
+
+    function gateUpsertScanner(name, status, reason) {
+        const n = String(name || "gate")
+        const arr = root.gateScanners.slice()
+        const row = { name: n, status: String(status || "running"), reason: String(reason || "") }
+        for (let i = 0; i < arr.length; i++) {
+            if (arr[i].name === n) {
+                arr[i] = row
+                root.gateScanners = arr
+                return
+            }
+        }
+        arr.push(row)
+        root.gateScanners = arr
+    }
+
+    function gateLine(line) {
+        const s = (line || "").trim()
+        if (s.length === 0) return
+        let o = null
+        try { o = JSON.parse(s) } catch (e) { return }
+        if (!o || typeof o !== "object") return
+
+        if (o.phase === "start") {
+            root.gateLoadedJson = String(o.out || "")
+            return
+        }
+        if (o.phase === "scanner") {
+            root.gateUpsertScanner(o.name, o.status, o.reason)
+            return
+        }
+        if (o.phase === "error") {
+            root.gateError = String(o.message || "gate error")
+            root.gateRunning = false
+            return
+        }
+        if (o.phase === "done") {
+            root.gateRunning = false
+            root.gateDone = true
+            root.gateVerdict = String(o.verdict || "")
+            root.gateCounts = o.counts || ({})
+            root.gateReason = String(o.reason || "")
+            if (o.json) root.loadGateJson(String(o.json))
+            else if (o.out) root.loadGateJson(String(o.out) + "/gate.json")
+            root.refreshGateHistory()
+        }
+    }
+
+    function startGate() {
+        if (!root.gateCanRun) return
+        root.gateRunning = true
+        root.gateDone = false
+        root.gateError = ""
+        root.gateVerdict = ""
+        root.gateReason = ""
+        root.gateCounts = ({})
+        root.gateFindings = []
+        root.gateScanners = []
+        root.gateToolErrors = ({})
+        root.gateLoadedJson = ""
+
+        const wrapper = root.homeDir + "/.local/bin/kimrity-gate"
+        const args = ["bash", "-lc", "exec \"$@\"", "kimrity-gate", wrapper,
+                      root.gateKind, root.gateTarget.trim()]
+        if (root.gateAuthorized) args.push("authorized")
+        gateRunProc.command = args
+        gateRunProc.running = true
+    }
+
+    function gateExited(code) {
+        root.gateExitCode = code
+        gateExitTimer.restart()
+    }
+
+    function loadGateJson(path) {
+        if (!path) return
+        root.gateJsonPending = path
+        gateJsonProc.command = ["bash", "-lc", "cat -- \"$1\"", "gatecat", path]
+        gateJsonProc.running = true
+    }
+
+    function gateJsonReady(t) {
+        const path = root.gateJsonPending
+        root.gateJsonPending = ""
+        let j = null
+        try { j = JSON.parse((t || "").trim()) } catch (e) { j = null }
+        if (!j || typeof j !== "object") {
+            root.gateError = path ? ("gate.json could not be read: " + path) : "gate.json could not be read"
+            if (!root.gateDone) root.gateRunning = false
+            return
+        }
+        root.gateLoadedJson = path
+        root.gateVerdict = String(j.verdict || "")
+        root.gateReason = String(j.reason || "")
+        root.gateCounts = j.counts || ({})
+        root.gateFindings = Array.isArray(j.findings) ? j.findings : []
+        root.gateToolErrors = j.tool_errors || ({})
+        root.gateDone = true
+        root.gateRunning = false
+        root.gateError = ""
+        if (j.meta) {
+            if (j.meta.kind) root.gateKind = String(j.meta.kind)
+            if (j.meta.target) root.gateTarget = String(j.meta.target)
+        }
+    }
+
+    function refreshGateHistory() {
+        root.gateHistoryLoading = true
+        gateHistoryProc.command = ["bash", "-lc",
+            "d=\"$1\"; [ -d \"$d\" ] || exit 0; for p in \"$d\"/*/; do [ -f \"$p/gate.json\" ] && basename \"$p\"; done | sort -r | head -n 5",
+            "gatehist", root.gateHistoryDir]
+        gateHistoryProc.running = true
+    }
+
+    function gateHistoryReady(t) {
+        root.gateHistoryLoading = false
+        const out = []
+        for (const line of (t || "").split("\n")) {
+            const s = line.trim()
+            if (s.length > 0) out.push(s)
+        }
+        root.gateHistory = out
+    }
+
+    function loadGateHistory(name) {
+        const dir = root.gateHistoryDir + "/" + name
+        root.gateRunning = false
+        root.gateDone = false
+        root.gateError = ""
+        root.gateVerdict = ""
+        root.gateReason = ""
+        root.gateCounts = ({})
+        root.gateFindings = []
+        root.gateScanners = []
+        root.gateToolErrors = ({})
+        root.gateLoadedJson = ""
+        root.loadGateJson(dir + "/gate.json")
     }
 
     function applyRows(t) {
@@ -266,6 +668,7 @@ ShellRoot {
     }
 
     function openEditor(key) {
+        root.gatePage = false
         for (let i = 0; i < root.clusters.length; i++)
             if (root.clusters[i].key === key) root.wsIndex = i
         root.editPreset = key
@@ -292,7 +695,11 @@ ShellRoot {
 
     function run(cmd) {
         if (!cmd) return
-        runner.command = ["bash", "-lc", cmd]
+        // The panel (qs) has no DISPLAY in its env -> Java/Swing apps (ghidra, burp)
+        // fail silently. _JAVA_AWT_WM_NONREPARENTING: avoids blank white Swing
+        // windows under XWayland.
+        runner.command = ["bash", "-lc",
+            "export DISPLAY=\"${DISPLAY:-:0}\"; export _JAVA_AWT_WM_NONREPARENTING=1; " + cmd]
         runner.running = true
         root.isOpen = false
     }
@@ -303,20 +710,30 @@ ShellRoot {
             root.handleKey(e)
     }
 
+    function presetKey(key) {
+        // Editor open: switch the preset in place, do not launch a workspace.
+        if (root.editPreset !== "") {
+            root.openEditor(key)
+            return
+        }
+        root.run("$HOME/.local/bin/workspace-launch " + key)
+    }
+
     function handleKey(e) {
         switch (e.key) {
         case Qt.Key_Escape:
             root.isOpen = false; e.accepted = true; break
-        case Qt.Key_F1: root.run("$HOME/.local/bin/workspace-launch F1"); e.accepted = true; break
-        case Qt.Key_F2: root.run("$HOME/.local/bin/workspace-launch F2"); e.accepted = true; break
-        case Qt.Key_F3: root.run("$HOME/.local/bin/workspace-launch F3"); e.accepted = true; break
+        case Qt.Key_F1: root.presetKey("F1"); e.accepted = true; break
+        case Qt.Key_F2: root.presetKey("F2"); e.accepted = true; break
+        case Qt.Key_F3: root.presetKey("F3"); e.accepted = true; break
         case Qt.Key_Down:  root.appIndex = Math.min(root.appIndex + 2, root.apps.length - 1); e.accepted = true; break
         case Qt.Key_Up:    root.appIndex = Math.max(root.appIndex - 2, 0); e.accepted = true; break
         case Qt.Key_Right: root.appIndex = Math.min(root.appIndex + 1, root.apps.length - 1); e.accepted = true; break
         case Qt.Key_Left:  root.appIndex = Math.max(root.appIndex - 1, 0); e.accepted = true; break
         case Qt.Key_Return:
         case Qt.Key_Enter:
-            if (root.apps[root.appIndex]) root.run(root.apps[root.appIndex].cmd)
+            if (root.editPreset === "" && !root.noteEdit && root.apps[root.appIndex])
+                root.run(root.apps[root.appIndex].cmd)
             e.accepted = true; break
         }
     }
@@ -388,18 +805,6 @@ ShellRoot {
                                     anchors.fill: parent
                                     onClicked: root.wsCall(["all", root.editPreset, "1"])
                                 }
-                            }
-
-                            Rectangle {
-                                width: 82; height: 28; radius: 7
-                                color: "#182236"
-                                anchors.verticalCenter: parent.verticalCenter
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: "Back"; color: "#c3cde6"
-                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
-                                }
-                                MouseArea { anchors.fill: parent; onClicked: root.editPreset = "" }
                             }
                         }
 
@@ -737,6 +1142,549 @@ ShellRoot {
                     }
                 }
 
+                // ================= halaman Gate =================
+                Rectangle {
+                    id: gatePageBox
+                    visible: root.gatePage
+                    z: 9
+                    x: 184; y: 8
+                    width: parent.width - 192
+                    height: parent.height - 16
+                    radius: 11
+                    color: "#0a0f1e"
+
+                    readonly property int scannerH: (root.gateRunning || root.gateScanners.length > 0) ? 94 : 0
+
+                    // Swallow empty clicks so they do not fall through to the dashboard behind.
+                    MouseArea { anchors.fill: parent; onClicked: {} }
+
+                    Column {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 10
+
+                        Item {
+                            width: parent.width; height: 22
+                            Text {
+                                id: gateTitle
+                                text: "Gate"; color: "#e3ebff"
+                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 15
+                                font.bold: true
+                            }
+                            Text {
+                                anchors.left: gateTitle.right; anchors.leftMargin: 10
+                                anchors.verticalCenter: gateTitle.verticalCenter
+                                text: "Security Gate · pick a target, run the scanners, read the CLI verdict"
+                                color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                            }
+                            Text {
+                                anchors.right: parent.right; anchors.verticalCenter: gateTitle.verticalCenter
+                                text: root.gateLoadedJson.length > 0 ? "gate.json" : "no scan yet"
+                                color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                            }
+                        }
+
+                        // ----- target + kind + authorization + run -----
+                        Item {
+                            width: parent.width; height: 34
+
+                            Rectangle {
+                                id: gateTargetBox
+                                x: 0; anchors.verticalCenter: parent.verticalCenter
+                                width: 328; height: 34; radius: 7
+                                color: "#0d1424"
+                                border.width: 1
+                                border.color: gateTargetInput.activeFocus ? "#2f6f69" : "#1c2740"
+
+                                Text {
+                                    visible: gateTargetInput.text.length === 0
+                                    x: 10; anchors.verticalCenter: parent.verticalCenter
+                                    text: "Target — folder/repo, URL, or host"
+                                    color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                }
+                                TextInput {
+                                    id: gateTargetInput
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10; anchors.rightMargin: 8
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    text: root.gateTarget
+                                    color: "#eef3ff"
+                                    clip: true
+                                    selectByMouse: true
+                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
+                                    onTextChanged: root.gateTarget = text
+                                    focus: root.gatePage && root.isOpen
+                                    Keys.onPressed: (e) => {
+                                        if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
+                                            root.startGate()
+                                            e.accepted = true
+                                        } else {
+                                            root.handleFieldKey(e)
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row {
+                                id: gateKindRow
+                                x: gateTargetBox.width + 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 4
+                                Repeater {
+                                    model: [
+                                        { k: "repo", l: "Folder/Repo" },
+                                        { k: "web", l: "Web" },
+                                        { k: "server", l: "Server" }
+                                    ]
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        width: modelData.k === "repo" ? 82 : (modelData.k === "web" ? 44 : 52)
+                                        height: 28; radius: 14
+                                        color: root.gateKind === modelData.k ? "#12343a" : "#101728"
+                                        border.width: 1
+                                        border.color: root.gateKind === modelData.k ? "#2f6f69" : "#243149"
+                                        opacity: root.gateRunning ? 0.55 : 1
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: modelData.l
+                                            color: root.gateKind === modelData.k ? "#4fd1c5" : "#93a1c0"
+                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: if (!root.gateRunning) root.gateKind = modelData.k
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                id: gateAuthBox
+                                x: gateKindRow.x + gateKindRow.width + 14
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 156; height: 28
+                                color: "transparent"
+                                Row {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 6
+                                    Rectangle {
+                                        width: 14; height: 14; radius: 3
+                                        color: "transparent"; border.width: 1
+                                        border.color: root.gateAuthorized ? "#4fd1c5" : "#4a5774"
+                                        Text {
+                                            anchors.centerIn: parent
+                                            visible: root.gateAuthorized
+                                            text: "✓"; color: "#4fd1c5"
+                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                        }
+                                    }
+                                    Text {
+                                        text: "I have authorization"
+                                        color: (root.gateKind === "repo")
+                                            ? "#5b6784"
+                                            : (root.gateAuthorized ? "#c9d4ec" : "#c08a62")
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: if (!root.gateRunning) root.gateAuthorized = !root.gateAuthorized
+                                }
+                            }
+
+                            Rectangle {
+                                id: gateRunBtn
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 92; height: 34; radius: 8
+                                color: root.gateRunning ? "#182236" : (root.gateCanRun ? "#12343a" : "#121a2b")
+                                border.width: 1
+                                border.color: root.gateCanRun ? "#2f6f69" : "#243149"
+                                opacity: root.gateCanRun ? 1 : 0.55
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: root.gateRunning ? "Scanning…" : "Run"
+                                    color: root.gateRunning ? "#e0a34a" : (root.gateCanRun ? "#4fd1c5" : "#5b6784")
+                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                    font.bold: true
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: root.startGate()
+                                }
+                            }
+                        }
+
+                        // ----- verdict + scanners + findings | history + AI -----
+                        Row {
+                            width: parent.width
+                            height: parent.height - 22 - 34 - 20
+                            spacing: 10
+
+                            Column {
+                                width: parent.width - 246
+                                height: parent.height
+                                spacing: 8
+
+                                // verdict + kiraan
+                                Rectangle {
+                                    width: parent.width; height: 66
+                                    radius: 10; color: "#101728"
+
+                                    Rectangle {
+                                        x: 12; y: 13
+                                        width: 160; height: 40; radius: 8
+                                        color: "#0d1424"
+                                        border.width: 1
+                                        border.color: root.gateRunning ? "#e0a34a"
+                                            : (root.gateError !== "" ? "#e8443a"
+                                            : (root.gateVerdict !== "" ? root.gateVerdictColor(root.gateVerdict) : "#243149"))
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: root.gateRunning ? "SCANNING…"
+                                                : (root.gateError !== "" ? "ERROR"
+                                                : (root.gateVerdict !== "" ? root.gateVerdictLabel(root.gateVerdict) : "—"))
+                                            color: root.gateRunning ? "#e0a34a"
+                                                : (root.gateError !== "" ? "#e8443a"
+                                                : (root.gateVerdict !== "" ? root.gateVerdictColor(root.gateVerdict) : "#5b6784"))
+                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 14
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    Row {
+                                        x: 184; y: 12
+                                        spacing: 18
+                                        Repeater {
+                                            model: [
+                                                { key: "high", label: "HIGH" },
+                                                { key: "medium", label: "MED" },
+                                                { key: "low", label: "LOW" }
+                                            ]
+                                            delegate: Column {
+                                                required property var modelData
+                                                spacing: 2
+                                                Text {
+                                                    text: modelData.label
+                                                    color: "#5f6c8c"
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                                }
+                                                Text {
+                                                    text: root.gateCount(modelData.key)
+                                                    color: root.gateSevColor(modelData.key)
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 14
+                                                    font.bold: true
+                                                }
+                                            }
+                                        }
+                                        Column {
+                                            visible: root.gateCount("critical") > 0
+                                            spacing: 2
+                                            Text {
+                                                text: "CRIT"
+                                                color: "#5f6c8c"
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                            }
+                                            Text {
+                                                text: root.gateCount("critical")
+                                                color: root.gateSevColor("critical")
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 14
+                                                font.bold: true
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        x: 184; y: 42
+                                        width: parent.width - 196
+                                        text: root.gateError !== "" ? root.gateError
+                                            : (root.gateReason !== "" ? root.gateReason
+                                            : (root.gateRunning ? "Scanner running…" : "No scan yet."))
+                                        color: root.gateError !== "" ? "#e08b95" : "#7d8aa8"
+                                        elide: Text.ElideRight
+                                        maximumLineCount: 1
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                    }
+                                }
+
+                                // status scanner (NDJSON)
+                                Rectangle {
+                                    visible: gatePageBox.scannerH > 0
+                                    width: parent.width; height: gatePageBox.scannerH
+                                    radius: 10; color: "#101728"
+
+                                    Text {
+                                        x: 12; y: 8; text: "Scanner"; color: "#b9c6e2"
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                    }
+                                    Text {
+                                        anchors.right: parent.right; anchors.rightMargin: 12; y: 9
+                                        text: root.gateRunning ? "NDJSON · live" : "NDJSON"
+                                        color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                    }
+
+                                    ListView {
+                                        anchors.left: parent.left; anchors.right: parent.right
+                                        anchors.top: parent.top; anchors.topMargin: 26
+                                        anchors.bottom: parent.bottom; anchors.bottomMargin: 8
+                                        anchors.leftMargin: 12; anchors.rightMargin: 8
+                                        clip: true
+                                        spacing: 2
+                                        model: root.gateScanners
+                                        delegate: Rectangle {
+                                            required property var modelData
+                                            width: ListView.view.width
+                                            height: 18
+                                            color: "transparent"
+                                            Row {
+                                                anchors.fill: parent
+                                                spacing: 6
+                                                Rectangle {
+                                                    width: 6; height: 6; radius: 3
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    color: modelData.status === "done" ? "#3fbf8f"
+                                                        : (modelData.status === "failed" ? "#e8443a" : "#e0a34a")
+                                                }
+                                                Text {
+                                                    width: 78
+                                                    text: modelData.name
+                                                    color: "#c9d4ec"
+                                                    elide: Text.ElideRight
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                }
+                                                Text {
+                                                    width: 48
+                                                    text: modelData.status
+                                                    color: modelData.status === "done" ? "#3fbf8f"
+                                                        : (modelData.status === "failed" ? "#e8443a" : "#e0a34a")
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                }
+                                                Text {
+                                                    width: parent.width - 6 - 78 - 48 - 18
+                                                    text: modelData.reason
+                                                    color: "#7d8aa8"
+                                                    elide: Text.ElideRight
+                                                    maximumLineCount: 1
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                }
+                                            }
+                                        }
+                                        ScrollBar.vertical: ScrollBar { width: 4; policy: ScrollBar.AsNeeded }
+                                    }
+
+                                    Text {
+                                        visible: root.gateScanners.length === 0
+                                        x: 12; y: 34
+                                        text: root.gateRunning ? "Preparing…" : "No scanner status."
+                                        color: "#5b6784"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                    }
+                                }
+
+                                // findings table
+                                Rectangle {
+                                    width: parent.width
+                                    height: parent.height - 66 - 8 - (gatePageBox.scannerH > 0 ? gatePageBox.scannerH + 8 : 0)
+                                    radius: 10; color: "#101728"
+
+                                    Text {
+                                        x: 12; y: 9; text: "Findings"; color: "#b9c6e2"
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                    }
+                                    Text {
+                                        anchors.right: parent.right; anchors.rightMargin: 12; y: 10
+                                        text: root.gateFindings.length + " issues"
+                                        color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                    }
+
+                                    Column {
+                                        id: gateFindingsCol
+                                        anchors.left: parent.left; anchors.right: parent.right
+                                        anchors.top: parent.top; anchors.topMargin: 28
+                                        anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        spacing: 1
+
+                                        Row {
+                                            width: parent.width; height: 16
+                                            spacing: 4
+                                            Text {
+                                                width: 54; text: "SEV"; color: "#5f6c8c"
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                            }
+                                            Text {
+                                                width: 64; text: "TOOL"; color: "#5f6c8c"
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                            }
+                                            Text {
+                                                width: parent.width - 54 - 64 - 110 - 12
+                                                text: "ISSUE"; color: "#5f6c8c"
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                            }
+                                            Text {
+                                                width: 110; text: "LOCATION"; color: "#5f6c8c"
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                            }
+                                        }
+
+                                        Text {
+                                            visible: root.gateFindings.length === 0
+                                            text: root.gateRunning ? "Waiting for results…"
+                                                : (root.gateDone ? "No findings reported." : "No scan yet.")
+                                            color: "#5b6784"
+                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                        }
+
+                                        Repeater {
+                                            model: root.gateFindings.slice(0, 12)
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                width: gateFindingsCol.width
+                                                height: 18
+                                                color: "transparent"
+                                                Row {
+                                                    anchors.fill: parent
+                                                    spacing: 4
+                                                    Text {
+                                                        width: 54
+                                                        text: String(modelData.severity || "")
+                                                        color: root.gateSevColor(modelData.severity)
+                                                        elide: Text.ElideRight
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                    }
+                                                    Text {
+                                                        width: 64
+                                                        text: String(modelData.tool || "")
+                                                        color: "#93a1c0"
+                                                        elide: Text.ElideRight
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                    }
+                                                    Text {
+                                                        width: parent.width - 54 - 64 - 110 - 12
+                                                        text: String(modelData.message || "")
+                                                        color: "#c9d4ec"
+                                                        elide: Text.ElideRight
+                                                        maximumLineCount: 1
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                    }
+                                                    Text {
+                                                        width: 110
+                                                        text: root.gateLocation(modelData)
+                                                        color: "#5b6784"
+                                                        elide: Text.ElideMiddle
+                                                        maximumLineCount: 1
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        Text {
+                                            visible: root.gateFindings.length > 12
+                                            text: "+" + (root.gateFindings.length - 12) + " more"
+                                            color: "#4fd1c5"
+                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                        }
+                                    }
+                                }
+                            }
+
+                            Column {
+                                width: 236
+                                height: parent.height
+                                spacing: 8
+
+                                // history of the last 5 scans
+                                Rectangle {
+                                    width: parent.width; height: 210
+                                    radius: 10; color: "#101728"
+
+                                    Text {
+                                        x: 12; y: 9; text: "History"; color: "#b9c6e2"
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                    }
+                                    Text {
+                                        anchors.right: parent.right; anchors.rightMargin: 12; y: 10
+                                        text: "latest 5"
+                                        color: "#4f5d7b"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
+                                    }
+
+                                    Column {
+                                        anchors.left: parent.left; anchors.right: parent.right
+                                        anchors.top: parent.top; anchors.topMargin: 30
+                                        anchors.leftMargin: 12; anchors.rightMargin: 12
+                                        spacing: 2
+
+                                        Text {
+                                            visible: root.gateHistory.length === 0
+                                            text: root.gateHistoryLoading ? "Loading…" : "No scans yet."
+                                            color: "#5b6784"
+                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                        }
+
+                                        Repeater {
+                                            model: root.gateHistory
+                                            delegate: Rectangle {
+                                                required property var modelData
+                                                width: parent.width; height: 30; radius: 6
+                                                color: histMouse.containsMouse ? "#182236" : "transparent"
+                                                opacity: root.gateRunning ? 0.5 : 1
+                                                Text {
+                                                    anchors.left: parent.left; anchors.leftMargin: 7
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    width: parent.width - 14
+                                                    text: modelData
+                                                    color: "#c9d4ec"
+                                                    elide: Text.ElideMiddle
+                                                    maximumLineCount: 1
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                }
+                                                MouseArea {
+                                                    id: histMouse
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    enabled: !root.gateRunning
+                                                    onClicked: root.loadGateHistory(modelData)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // placeholder AI — intentionally no logic
+                                Rectangle {
+                                    width: parent.width
+                                    height: parent.height - 210 - 8
+                                    radius: 10
+                                    color: "#0d1424"
+                                    border.width: 1
+                                    border.color: "#243149"
+
+                                    Text {
+                                        x: 12; y: 10
+                                        text: "AI analysis — not available yet"
+                                        color: "#5b6784"
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                    }
+                                    Text {
+                                        x: 12; y: 32
+                                        width: parent.width - 24
+                                        text: "This Gate version only shows the CLI rule engine verdict. No AI model is used."
+                                        color: "#46536f"
+                                        wrapMode: Text.WordWrap
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Row {
                     anchors.fill: parent
                     anchors.margins: 8
@@ -765,7 +1713,7 @@ ShellRoot {
                                         color: "#dbe3f4"
                                         font.family: "JetBrainsMono Nerd Font"
                                         font.pixelSize: 11
-                                        focus: root.isOpen
+                                        focus: root.isOpen && !root.gatePage
                                         onTextChanged: { root.filter = text; root.appIndex = 0 }
                                         Keys.onPressed: (e) => root.handleKey(e)
                                         Text { visible: parent.text.length === 0; text: "Search…"; color: "#5b6784"; font: parent.font }
@@ -777,20 +1725,30 @@ ShellRoot {
 
                             Rectangle {
                                 width: parent.width; height: 28; radius: 6
-                                color: root.catIndex === -1 ? "#182236" : "transparent"
+                                color: (root.catIndex === -1 && root.editPreset === "" && !root.gatePage) ? "#182236" : "transparent"
                                 Rectangle {
                                     width: 2; height: parent.height - 10
                                     anchors.verticalCenter: parent.verticalCenter
-                                    color: "#4fd1c5"; visible: root.catIndex === -1
+                                    color: "#4fd1c5"; visible: root.catIndex === -1 && root.editPreset === "" && !root.gatePage
                                 }
                                 Row {
                                     anchors.verticalCenter: parent.verticalCenter
                                     anchors.left: parent.left; anchors.leftMargin: 9
                                     spacing: 8
-                                    Text { text: "\uf00a"; color: root.catIndex === -1 ? "#4fd1c5" : "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
-                                    Text { text: "Quick access"; color: root.catIndex === -1 ? "#e7eeff" : "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
+                                    Text { text: "\uf00a"; color: (root.catIndex === -1 && root.editPreset === "" && !root.gatePage) ? "#4fd1c5" : "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
+                                    Text { text: "Quick access"; color: (root.catIndex === -1 && root.editPreset === "" && !root.gatePage) ? "#e7eeff" : "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
                                 }
-                                MouseArea { anchors.fill: parent; onClicked: { root.catIndex = -1; root.appIndex = 0 } }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: {
+                                        root.gatePage = false
+                                        root.editPreset = ""
+                                        root.noteEdit = false
+                                        root.notesMenuOpen = false
+                                        root.catIndex = -1
+                                        root.appIndex = 0
+                                    }
+                                }
                             }
 
                             // --- dropdown: preset settings ---
@@ -832,30 +1790,8 @@ ShellRoot {
                                 }
                             }
 
-                            Repeater {
-                                model: root.cats
-                                delegate: Rectangle {
-                                    required property int index
-                                    required property var modelData
-                                    width: parent.width; height: 26; radius: 6
-                                    color: root.catIndex === index ? "#182236" : "transparent"
-                                    Row {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        anchors.left: parent.left; anchors.leftMargin: 9
-                                        spacing: 8
-                                        Text { text: "\uf105"; color: "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10 }
-                                        Text {
-                                            text: modelData
-                                            color: root.catIndex === index ? "#e7eeff" : "#93a1c0"
-                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
-                                        }
-                                    }
-                                    MouseArea { anchors.fill: parent; onClicked: { root.catIndex = index; root.appIndex = 0 } }
-                                }
-                            }
-
                             // push the rest to the bottom
-                            Item { width: 1; height: Math.max(0, parent.height - 30 - 4 - 28 - 26 - root.cats.length * 26 - 26 - 4 - (root.setOpen ? 100 : 0)) }
+                            Item { width: 1; height: Math.max(0, parent.height - 30 - 4 - 28 - 26 - 26 - 26 - 4 - (root.setOpen ? 100 : 0)) }
 
                             Rectangle {
                                 width: parent.width; height: 26; radius: 6; color: "transparent"
@@ -867,6 +1803,34 @@ ShellRoot {
                                     Text { text: "Settings"; color: "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
                                 }
                                 MouseArea { anchors.fill: parent; onClicked: root.run("kitty -e nvim ~/.config/hypr/hyprland.conf") }
+                            }
+
+                            Rectangle {
+                                width: parent.width; height: 26; radius: 6
+                                color: root.gatePage ? "#182236" : "transparent"
+                                Rectangle {
+                                    width: 2; height: parent.height - 10
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    color: "#4fd1c5"; visible: root.gatePage
+                                }
+                                Row {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left; anchors.leftMargin: 9
+                                    spacing: 8
+                                    Text { text: "\uf132"; color: root.gatePage ? "#4fd1c5" : "#66738f"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
+                                    Text { text: "Gate"; color: root.gatePage ? "#e7eeff" : "#93a1c0"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: {
+                                        root.editPreset = ""
+                                        root.noteEdit = false
+                                        root.notesMenuOpen = false
+                                        root.setOpen = false
+                                        root.gatePage = true
+                                        root.refreshGateHistory()
+                                    }
+                                }
                             }
                         }
                     }
@@ -1079,22 +2043,43 @@ ShellRoot {
                                         height: 28; radius: 6
                                         color: root.appIndex === index ? "#182236" : "transparent"
 
-                                        Row {
-                                            anchors.verticalCenter: parent.verticalCenter
-                                            anchors.left: parent.left; anchors.leftMargin: 6
-                                            spacing: 8
+                                        Column {
+                                            anchors.centerIn: parent
+                                            spacing: 0
+
+                                            Image {
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                visible: modelData.icon.length > 0
+                                                width: 18; height: 18
+                                                source: modelData.icon.length > 0 ? "file://" + modelData.icon : ""
+                                                sourceSize.width: 22
+                                                fillMode: Image.PreserveAspectFit
+                                                smooth: true
+                                                asynchronous: true
+                                            }
+
+                                            // Monogram fallback when the icon path is "--".
                                             Rectangle {
-                                                width: 18; height: 18; radius: 4; color: modelData.c
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                visible: modelData.icon.length === 0
+                                                width: 18; height: 18; radius: 4; color: "#64748f"
                                                 Text {
                                                     anchors.centerIn: parent
-                                                    text: modelData.m; color: "#0a0f1e"
+                                                    text: root.monogram(modelData.name)
+                                                    color: "#ffffff"
                                                     font.family: "JetBrainsMono Nerd Font"
                                                     font.pixelSize: 8; font.bold: true
                                                 }
                                             }
+
                                             Text {
-                                                text: modelData.n; color: "#c3cde6"
-                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
+                                                anchors.horizontalCenter: parent.horizontalCenter
+                                                width: appGrid.width / 2 - 8
+                                                horizontalAlignment: Text.AlignHCenter
+                                                text: modelData.name; color: "#c3cde6"
+                                                elide: Text.ElideRight
+                                                maximumLineCount: 1
+                                                font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 8
                                             }
                                         }
 
@@ -1144,28 +2129,177 @@ ShellRoot {
 
                                 Text { x: 12; y: 10; text: "Notes"; color: "#b9c6e2"; font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11 }
 
+                                // small dropdown: + Note, + Checklist, Edit, Remove
                                 Rectangle {
+                                    id: notesBtn
                                     anchors.right: parent.right; anchors.rightMargin: 12; y: 9
-                                    width: 52; height: 16; radius: 8
-                                    color: "transparent"; border.width: 1; border.color: "#2f6f69"
+                                    width: 26; height: 16; radius: 8
+                                    color: root.notesMenuOpen ? "#182236" : "transparent"
+                                    border.width: 1; border.color: "#2f6f69"
                                     Text {
                                         anchors.centerIn: parent
-                                        text: "AI · live"; color: "#4fd1c5"
-                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                        text: "⋯"; color: "#4fd1c5"
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 11
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: root.notesMenuOpen = !root.notesMenuOpen
+                                    }
+                                }
+
+                                Rectangle {
+                                    id: notesMenu
+                                    visible: root.notesMenuOpen
+                                    z: 50
+                                    x: notesBtn.x + notesBtn.width - width
+                                    y: notesBtn.y + notesBtn.height + 4
+                                    width: 124
+                                    height: notesMenuCol.height + 8
+                                    radius: 7; color: "#0b1222"
+                                    border.color: "#33445f"; border.width: 1
+
+                                    Column {
+                                        id: notesMenuCol
+                                        anchors.fill: parent
+                                        anchors.margins: 4
+                                        spacing: 1
+                                        Repeater {
+                                            model: [
+                                                { label: "+ Note", act: "note" },
+                                                { label: "+ Checklist", act: "check" },
+                                                { label: "Edit", act: "edit" },
+                                                { label: "Remove", act: "del" }
+                                            ]
+                                            delegate: Rectangle {
+                                                id: menuItem
+                                                required property var modelData
+                                                width: parent.width; height: 22; radius: 4
+                                                color: menuMouse.containsMouse ? "#16304a" : "transparent"
+                                                opacity: (modelData.act === "edit" || modelData.act === "del") && root.noteIndex < 0 ? 0.4 : 1
+                                                Text {
+                                                    anchors.left: parent.left; anchors.leftMargin: 8
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: modelData.label
+                                                    color: modelData.act === "del" ? "#e08b95" : "#dbe6ff"
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                                }
+                                                MouseArea {
+                                                    id: menuMouse
+                                                    anchors.fill: parent
+                                                    hoverEnabled: true
+                                                    onClicked: root.notesMenuAction(modelData.act)
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
                                 Column {
-                                    anchors.left: parent.left
-                                    anchors.top: parent.top; anchors.topMargin: 34
-                                    anchors.leftMargin: 12
-                                    spacing: 5
+                                    id: notesCol
+                                    anchors.left: parent.left; anchors.right: parent.right
+                                    anchors.top: parent.top; anchors.topMargin: 32
+                                    anchors.leftMargin: 12; anchors.rightMargin: 12
+                                    spacing: 2
+
+                                    Text {
+                                        visible: root.notes.length === 0
+                                        text: "No notes"; color: "#5b6784"
+                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                    }
+
                                     Repeater {
                                         model: root.notes
-                                        delegate: Text {
+                                        delegate: Rectangle {
+                                            required property int index
                                             required property var modelData
-                                            text: modelData; color: "#93a0be"
-                                            font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                            width: notesCol.width; height: 22; radius: 5
+                                            color: root.noteIndex === index ? "#182236" : "transparent"
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: {
+                                                    root.noteIndex = index
+                                                    root.noteEdit = false
+                                                }
+                                            }
+
+                                            Row {
+                                                anchors.verticalCenter: parent.verticalCenter
+                                                anchors.left: parent.left; anchors.leftMargin: 6
+                                                anchors.right: parent.right; anchors.rightMargin: 6
+                                                spacing: 6
+
+                                                // check box (type "check" only)
+                                                Rectangle {
+                                                    visible: modelData.type === "check"
+                                                    width: 12; height: 12; radius: 3
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    color: "transparent"; border.width: 1
+                                                    border.color: modelData.done ? "#4fd1c5" : "#4a5774"
+                                                    Text {
+                                                        anchors.centerIn: parent
+                                                        visible: modelData.done === true
+                                                        text: "✓"; color: "#4fd1c5"
+                                                        font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 9
+                                                    }
+                                                    MouseArea {
+                                                        anchors.fill: parent
+                                                        onClicked: {
+                                                            root.noteIndex = index
+                                                            root.toggleNote(modelData.id)
+                                                        }
+                                                    }
+                                                }
+
+                                                Text {
+                                                    visible: modelData.type !== "check"
+                                                    text: "•"; color: "#5b6784"
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                                }
+
+                                                Text {
+                                                    visible: !(root.noteEdit && root.noteIndex === index)
+                                                    width: parent.width - (modelData.type === "check" ? 30 : 20)
+                                                    text: String(modelData.text || "").length > 0 ? String(modelData.text) : "(empty)"
+                                                    color: modelData.done ? "#5b6784" : "#93a0be"
+                                                    elide: Text.ElideRight
+                                                    maximumLineCount: 1
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                                }
+
+                                                TextInput {
+                                                    visible: root.noteEdit && root.noteIndex === index
+                                                    width: parent.width - (modelData.type === "check" ? 30 : 20)
+                                                    text: modelData.text || ""
+                                                    color: "#eef3ff"
+                                                    clip: true
+                                                    selectByMouse: true
+                                                    focus: visible
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    font.family: "JetBrainsMono Nerd Font"; font.pixelSize: 10
+                                                    Keys.onPressed: (e) => {
+                                                        if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
+                                                            root.commitNote(modelData.id, text)
+                                                            e.accepted = true
+                                                        } else {
+                                                            root.handleFieldKey(e)
+                                                        }
+                                                    }
+                                                    onEditingFinished: {
+                                                        if (!visible) return
+                                                        if (text !== (modelData.text || "")) root.commitNote(modelData.id, text)
+                                                        else root.noteEdit = false
+                                                    }
+                                                    Text {
+                                                        visible: parent.text.length === 0
+                                                        text: "Note…"; color: "#5b6784"
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        font: parent.font
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

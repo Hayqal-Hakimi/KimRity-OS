@@ -40,8 +40,10 @@ ARSENAL=1
 AI_PKGS=0
 
 BASE_PKGS=(base linux linux-firmware btrfs-progs networkmanager sudo neovim limine efibootmgr openssh)
-DESKTOP_PKGS=(hyprland kitty waybar wofi mako xdg-desktop-portal-hyprland xdg-desktop-portal
-              polkit hyprpolkitagent pipewire pipewire-pulse wireplumber mesa
+DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
+              kitty waybar wofi mako cliphist yazi playerctl
+              xdg-desktop-portal-hyprland xdg-desktop-portal
+              polkit pipewire pipewire-pulse wireplumber mesa
               ttf-jetbrains-mono-nerd)
 TOOL_PKGS=(git base-devel btop wl-clipboard grim slurp tcpdump nmap audit yara firefox gptfdisk iputils inetutils)
 
@@ -212,7 +214,13 @@ format_and_mount() {
 
 pacstrap_base() {
   step "4/10 pacstrap base packages (${#BASE_PKGS[@]} packages)"
-  run pacstrap -K "$MOUNTPOINT" "${BASE_PKGS[@]}"
+
+  # No -K here. `pacstrap -K` initialises an EMPTY keyring in the target and
+  # implies -G (never copy the host keyring), so package signature checks fail
+  # with "required key missing from keyring". The live ISO populates its own
+  # keyring at boot via pacman-init.service (shipped in this ISO profile) and
+  # pacstrap copies that populated keyring into the new root.
+  run pacstrap "$MOUNTPOINT" "${BASE_PKGS[@]}"
 
   step "5/10 genfstab"
   if [ "$DRY" = 1 ]; then
@@ -311,7 +319,7 @@ install_dotfiles() {
     warn "dotfiles missing — skipped"; return 0
   fi
   if [ "$DRY" = 1 ]; then
-    printf '[dry] cp %s/{hypr,kitty,waybar} -> %s/home/%s/.config/ ; bash_profile -> ~/.bash_profile\n' \
+    printf '[dry] cp %s/{hypr,kitty,waybar,quickshell,wofi} -> %s/home/%s/.config/ ; kimrity/workspaces.conf -> ~/.config/kimrity/ ; bash_profile -> ~/.bash_profile\n' \
       "$DOTFILES_DIR" "$MOUNTPOINT" "$USERNAME"
     return 0
   fi
@@ -319,11 +327,16 @@ install_dotfiles() {
   local home="$MOUNTPOINT/home/$USERNAME"
   install -d -m 755 "$home/.config"
   local d
-  for d in hypr kitty waybar; do
+  for d in hypr kitty waybar quickshell wofi; do
     [ -d "$DOTFILES_DIR/$d" ] || continue
     install -d "$home/.config/$d"
     cp -a "$DOTFILES_DIR/$d/." "$home/.config/$d/"
   done
+  # kimrity-ws / workspace-launch / kimrity-icons / shell.qml all read this path
+  if [ -f "$DOTFILES_DIR/kimrity/workspaces.conf" ]; then
+    install -d -m 755 "$home/.config/kimrity"
+    install -m 644 "$DOTFILES_DIR/kimrity/workspaces.conf" "$home/.config/kimrity/workspaces.conf"
+  fi
   [ -f "$DOTFILES_DIR/bash_profile" ] && cp -a "$DOTFILES_DIR/bash_profile" "$home/.bash_profile"
   if [ -d "$DOTFILES_DIR/local-bin" ]; then
     install -d -m 755 "$home/.local/bin"
