@@ -44,7 +44,7 @@ DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               kitty waybar wofi mako cliphist yazi playerctl
               xdg-desktop-portal-hyprland xdg-desktop-portal
               polkit pipewire pipewire-pulse wireplumber mesa
-              ttf-jetbrains-mono-nerd)
+              swaybg ttf-jetbrains-mono-nerd)
 TOOL_PKGS=(git base-devel btop wl-clipboard grim slurp tcpdump nmap audit yara firefox gptfdisk iputils inetutils)
 
 # ------------------------------------------------------------------ utilities
