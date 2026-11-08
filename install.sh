@@ -24,6 +24,7 @@ ESP_LABEL="ESP"
 ROOT_LABEL="arch"
 ROOT_SUBVOL="@"
 HOME_SUBVOL="@home"
+SNAP_SUBVOL="@snapshots"
 MOUNT_OPTS="compress=zstd:3"
 MOUNTPOINT="/mnt"
 LOG="/var/log/install-arch.log"
@@ -39,7 +40,7 @@ EFI=0
 ARSENAL=1
 AI_PKGS=0
 
-BASE_PKGS=(base linux linux-firmware btrfs-progs networkmanager sudo neovim limine efibootmgr openssh)
+BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh)
 DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               kitty waybar wofi mako cliphist yazi playerctl
               xdg-desktop-portal-hyprland xdg-desktop-portal
@@ -72,7 +73,8 @@ Usage: $(basename "$0") --disk /dev/XXX [options]
   --yes            do not ask for typed confirmation
   --force          allow a disk that already has NTFS partitions (Windows)
   --efi            VM: write a Limine NVRAM entry via efibootmgr
-  --no-arsenal     do not install the BlackArch tools + Security Gate
+  --no-arsenal     do not install the BlackArch tools (the Security Gate
+                   and kimscan are still installed)
   --ai             also install heavy AI security tools (garak, promptfoo…)
   --dry-run        print commands only, no changes
   -h, --help
@@ -176,7 +178,7 @@ EOF
 
 # -------------------------------------------------------------------- steps
 partition_disk() {
-  step "1/10 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
+  step "1/11 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
   run wipefs -a "$DISK"
   run sgdisk --zap-all "$DISK"
   run sgdisk -n "1:0:+1G" -t "1:ef00" -c "1:$ESP_LABEL" "$DISK"
@@ -197,14 +199,21 @@ partition_disk() {
 format_and_mount() {
   local root="${DISK}"; root="$(part 2)"; local esp; esp="$(part 1)"
 
-  step "2/10 Format: vfat (ESP) + btrfs ($ROOT_LABEL)"
+  step "2/11 Format: vfat (ESP) + btrfs ($ROOT_LABEL)"
   run mkfs.fat -F 32 -n "$ESP_LABEL" "$esp"
   run mkfs.btrfs -f -L "$ROOT_LABEL" "$root"
 
-  step "3/10 Subvolumes + mounts ($MOUNT_OPTS)"
+  # @snapshots lives at FS_TREE level (sibling of @), NOT nested under @.
+  # A rollback replaces @ (rename @ -> @.bak, new -> @); a sibling snapshot DB
+  # survives that untouched. Nested under @ it would move with the damaged
+  # system (the B0b lesson: mv across subvolumes fails with EXDEV).
+  # It is mounted only later — snapper's create-config needs /.snapshots to
+  # not exist yet as a mountpoint (ArchWiki: Snapper # Btrfs layout).
+  step "3/11 Subvolumes + mounts ($MOUNT_OPTS)"
   run mount "$root" "$MOUNTPOINT"
   run btrfs subvolume create "$MOUNTPOINT/$ROOT_SUBVOL"
   run btrfs subvolume create "$MOUNTPOINT/$HOME_SUBVOL"
+  run btrfs subvolume create "$MOUNTPOINT/$SNAP_SUBVOL"
   run umount "$MOUNTPOINT"
   run mount -o "$MOUNT_OPTS,subvol=$ROOT_SUBVOL" "$root" "$MOUNTPOINT"
   run mkdir -p "$MOUNTPOINT/home" "$MOUNTPOINT/boot"
@@ -213,7 +222,7 @@ format_and_mount() {
 }
 
 pacstrap_base() {
-  step "4/10 pacstrap base packages (${#BASE_PKGS[@]} packages)"
+  step "4/11 pacstrap base packages (${#BASE_PKGS[@]} packages)"
 
   # No -K here. `pacstrap -K` initialises an EMPTY keyring in the target and
   # implies -G (never copy the host keyring), so package signature checks fail
@@ -222,7 +231,7 @@ pacstrap_base() {
   # pacstrap copies that populated keyring into the new root.
   run pacstrap "$MOUNTPOINT" "${BASE_PKGS[@]}"
 
-  step "5/10 genfstab"
+  step "5/11 genfstab"
   if [ "$DRY" = 1 ]; then
     printf '[dry] genfstab -U %s >> %s/etc/fstab\n' "$MOUNTPOINT" "$MOUNTPOINT"
   else
@@ -234,7 +243,7 @@ pacstrap_base() {
 chroot_configure() {
   local cfile="$MOUNTPOINT/root/chroot-setup.sh"
 
-  step "6/10 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
+  step "6/11 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] write %s and run: arch-chroot %s bash /root/chroot-setup.sh\n' "$cfile" "$MOUNTPOINT"
@@ -280,7 +289,7 @@ bootloader_limine() {
   local root esp uuid
   root="$(part 2)"; esp="$(part 1)"
 
-  step "7/10 Limine (fallback path + limine.conf)"
+  step "7/11 Limine (fallback path + limine.conf)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] cp BOOTX64.EFI -> %s/boot/EFI/BOOT/ ; write limine.conf (UUID from blkid)\n' "$MOUNTPOINT"
@@ -314,7 +323,7 @@ CONF
 }
 
 install_dotfiles() {
-  step "8/10 Dotfiles -> /home/$USERNAME"
+  step "8/11 Dotfiles -> /home/$USERNAME"
   if [ ! -d "$DOTFILES_DIR" ]; then
     warn "dotfiles missing — skipped"; return 0
   fi
@@ -351,47 +360,102 @@ install_dotfiles() {
 }
 
 install_packages() {
-  step "9/10 Desktop packages (${#DESKTOP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
+  step "9/11 Desktop packages (${#DESKTOP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
   run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${DESKTOP_PKGS[@]}" "${TOOL_PKGS[@]}"
 }
 
-install_arsenal() {
-  step "10/10 BlackArch arsenal + Security Gate"
-  if [ "$ARSENAL" = 0 ]; then
-    info "arsenal skipped (--no-arsenal)"; return 0
-  fi
-
-  local list="$SCRIPT_DIR/tools/arsenal.list"
-  local ai_list="$SCRIPT_DIR/tools/arsenal-ai.list"
-  [ -f "$list" ] || { warn "tools/arsenal.list missing — skipped"; return 0; }
-
-  local pkgs=() line
-  while IFS= read -r line; do
-    case "$line" in ''|\#*) continue ;; esac
-    pkgs+=("$line")
-  done < "$list"
+# -----------------------------------------------------------------------------
+# Snapshot stack (B0c) — lessons baked in from B0a/B0b (8 Nov, proven in QEMU):
+#
+#   * snapper + snap-pac are in BASE_PKGS: pacman transactions get pre/post
+#     snapshots automatically once the config exists. Hooks failing before
+#     that are non-fatal (verified: pacman keeps rc=0, "config does not exist").
+#   * create-config must run while /.snapshots does NOT exist as a mountpoint
+#     (ArchWiki notes it fails otherwise). It creates a nested .snapshots
+#     under @ — we delete it and mount the FS_TREE sibling @snapshots there.
+#   * fstab uses a subvol= path (not subvolid), so the snapshot DB mount
+#     survives renames of @ during a rollback. ID-anchored fstab (subvolid=<n>)
+#     is the fix for already-installed systems (B0b lesson).
+#   * Rolling back — the proven operator procedure (B0b):
+#       1) snapper --ambit classic rollback N   (the ambit is required)
+#       2) boot the RW clone: in limine.conf set
+#          rootflags=subvol=@/.snapshots/N/snapshot  (pick a menu entry if
+#          the system cannot boot at all)
+#       3) merge: btrfs snapshot of that clone to FS_TREE (@new), then rename
+#          inside FS_TREE (@ -> @.bak-damaged, @new -> @) and set the default
+#          subvolume. NEVER mv content across subvolumes — btrfs says EXDEV.
+#       4) with @snapshots as a sibling, no snapshot-DB transplant is needed.
+#   * systemd stub subvolumes (var/lib/portables, var/lib/machines) show up as
+#     empty stubs inside a snapshot — normal, nothing to do.
+# -----------------------------------------------------------------------------
+install_snapper_stack() {
+  step "10/11 Snapshot stack: snapper configs (root, home) + limits + timers"
 
   if [ "$DRY" = 1 ]; then
-    printf '[dry] setup-blackarch inside the chroot -> pacman -S %s core packages\n' "${#pkgs[@]}"
-    [ "$AI_PKGS" = 1 ] && printf '[dry] + blackarch-ai group (%s packages)\n' \
-      "$(grep -vcE '^\s*(#|$)' "$ai_list" 2>/dev/null || echo '?')"
-    printf '[dry] gate.py -> /usr/local/bin/kimrity-gate\n'
-    printf '[dry] kimscan + en.yaml -> /usr/local/bin/kimscan + /usr/local/share/kimscanning/rules/\n'
+    printf '[dry] chroot: snapper create-config / (root) + /home (home)\n'
+    printf '[dry] chroot: delete nested /.snapshots created by create-config\n'
+    printf '[dry] append fstab entry for %s + mount it + chmod 750\n' "$SNAP_SUBVOL"
+    printf '[dry] per-config limits (root: 5h/7d/2w/1m, home: 5h/7d/0w/10m) + number 50\n'
+    printf '[dry] enable snapper-timeline.timer snapper-cleanup.timer\n'
     return 0
   fi
 
-  install -Dm755 "$SCRIPT_DIR/tools/setup-blackarch.sh" "$MOUNTPOINT/root/setup-blackarch.sh"
-  run arch-chroot "$MOUNTPOINT" sh /root/setup-blackarch.sh
+  # --no-dbus works without a running dbus inside the chroot; retry without
+  # the flag as a safety net for older snapper builds.
+  _snapper_chroot() {
+    local cmd
+    if run arch-chroot "$MOUNTPOINT" snapper --no-dbus "$@"; then
+      return 0
+    fi
+    warn "snapper --no-dbus failed, retrying plain"
+    run arch-chroot "$MOUNTPOINT" snapper "$@"
+  }
 
-  run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${pkgs[@]}"
+  _snapper_chroot -c root create-config /
+  _snapper_chroot -c home create-config /home
 
-  if [ "$AI_PKGS" = 1 ] && [ -f "$ai_list" ]; then
-    local ai=() aline
-    while IFS= read -r aline; do
-      case "$aline" in ''|\#*) continue ;; esac
-      ai+=("$aline")
-    done < "$ai_list"
-    run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${ai[@]}"
+  # Limits (mirrors the values proven in the QEMU guest, B0a)
+  _snapper_chroot -c root set-config \
+    NUMBER_LIMIT=50 NUMBER_LIMIT_IMPORTANT=10 \
+    TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 \
+    TIMELINE_LIMIT_WEEKLY=2 TIMELINE_LIMIT_MONTHLY=1 \
+    TIMELINE_LIMIT_QUARTERLY=0 TIMELINE_LIMIT_YEARLY=10
+  _snapper_chroot -c home set-config \
+    NUMBER_LIMIT=50 NUMBER_LIMIT_IMPORTANT=10 \
+    TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 \
+    TIMELINE_LIMIT_WEEKLY=0 TIMELINE_LIMIT_MONTHLY=10 \
+    TIMELINE_LIMIT_QUARTERLY=0 TIMELINE_LIMIT_YEARLY=10
+
+  # ArchWiki procedure: create-config made a NESTED /.snapshots under @;
+  # delete it, then mount the sibling @snapshots at the same path by fstab.
+  run btrfs subvolume delete "$MOUNTPOINT/.snapshots"
+
+  local uuid
+  uuid="$(blkid -s UUID -o value "$(part 2)")"
+
+  {
+    printf '\n# snapshot DB mount (B0c): sibling subvol, path-anchored so it\n'
+    printf '# survives renames of @ during rollback\n'
+    printf 'UUID=%s\t/.snapshots\tbtrfs\trw,relatime,%s,subvol=/%s\t0 0\n' \
+      "$uuid" "$MOUNT_OPTS" "$SNAP_SUBVOL"
+  } >> "$MOUNTPOINT/etc/fstab"
+  printf '+ fstab: /.snapshots -> %s (%s)\n' "$SNAP_SUBVOL" "$uuid"
+
+  run mount -o "$MOUNT_OPTS,subvol=$SNAP_SUBVOL" "$(part 2)" "$MOUNTPOINT/.snapshots"
+  run chmod 750 "$MOUNTPOINT/.snapshots"
+
+  run arch-chroot "$MOUNTPOINT" systemctl enable snapper-timeline.timer snapper-cleanup.timer
+
+  info "snapshot stack ready (@snapshots sibling, timers on)"
+}
+
+install_gate_tools() {
+  # ALWAYS installed — the 8 Nov lesson from --no-arsenal: build 9 shipped
+  # without gate/kimscan, so the default build must carry them.
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] gate.py -> /usr/local/bin/kimrity-gate (always, even --no-arsenal)\n'
+    printf '[dry] kimscan + en.yaml -> /usr/local/bin/kimscan + /usr/local/share/kimscanning/rules/\n'
+    return 0
   fi
 
   install -Dm755 "$SCRIPT_DIR/gate/gate.py" "$MOUNTPOINT/usr/local/bin/kimrity-gate"
@@ -399,8 +463,47 @@ install_arsenal() {
   # KimScanning engine: kimscan CLI reads rules/en.yaml (English, no AI).
   install -Dm755 "$SCRIPT_DIR/kimscanning/kimscan" "$MOUNTPOINT/usr/local/bin/kimscan"
   install -Dm644 "$SCRIPT_DIR/kimscanning/rules/en.yaml" "$MOUNTPOINT/usr/local/share/kimscanning/rules/en.yaml"
-  rm -f "$MOUNTPOINT/root/setup-blackarch.sh"
-  info "arsenal (${#pkgs[@]} packages) + gate + kimscan installed"
+}
+
+install_arsenal() {
+  step "11/11 BlackArch arsenal (optional) + Security Gate + kimscan (always)"
+  if [ "$ARSENAL" = 0 ]; then
+    info "BlackArch arsenal skipped (--no-arsenal)"
+  else
+    local list="$SCRIPT_DIR/tools/arsenal.list"
+    local ai_list="$SCRIPT_DIR/tools/arsenal-ai.list"
+    [ -f "$list" ] || { warn "tools/arsenal.list missing — skipped"; return 0; }
+
+    local pkgs=() line
+    while IFS= read -r line; do
+      case "$line" in ''|\#*) continue ;; esac
+      pkgs+=("$line")
+    done < "$list"
+
+    if [ "$DRY" = 1 ]; then
+      printf '[dry] setup-blackarch inside the chroot -> pacman -S %s core packages\n' "${#pkgs[@]}"
+      [ "$AI_PKGS" = 1 ] && printf '[dry] + blackarch-ai group (%s packages)\n' \
+        "$(grep -vcE '^\s*(#|$)' "$ai_list" 2>/dev/null || echo '?')"
+    else
+      install -Dm755 "$SCRIPT_DIR/tools/setup-blackarch.sh" "$MOUNTPOINT/root/setup-blackarch.sh"
+      run arch-chroot "$MOUNTPOINT" sh /root/setup-blackarch.sh
+
+      run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${pkgs[@]}"
+
+      if [ "$AI_PKGS" = 1 ] && [ -f "$ai_list" ]; then
+        local ai=() aline
+        while IFS= read -r aline; do
+          case "$aline" in ''|\#*) continue ;; esac
+          ai+=("$aline")
+        done < "$ai_list"
+        run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${ai[@]}"
+      fi
+      rm -f "$MOUNTPOINT/root/setup-blackarch.sh"
+    fi
+    info "arsenal (${#pkgs[@]} packages) done"
+  fi
+
+  install_gate_tools
 }
 
 finish() {
@@ -437,6 +540,7 @@ main() {
   bootloader_limine
   install_dotfiles
   install_packages
+  install_snapper_stack
   install_arsenal
   finish
 }
