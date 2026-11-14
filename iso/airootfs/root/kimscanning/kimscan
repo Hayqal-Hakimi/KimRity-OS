@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""KimScanning v1 — terminal wrapper around gate/gate.py.
+"""KimScanning v2 — terminal scanner and local posture mirror.
 
-KimScanning does not make its own security decisions. It runs the
-KimRity Security Gate, stores every scan as a session object, explains
-findings in English from a static dictionary (no AI), and keeps finding
-statuses consistent across repeated scans.
+Two modes:
+
+* artifact scans (`repo`, `file`, `installer`, `web`, `server`) run the
+  KimRity Security Gate and explain its findings from a static dictionary;
+* `posture` inspects the running host itself (auditd, the KimAI pipeline,
+  listeners, sshd, accounts, sysctl) and compares the result with a saved
+  baseline, so drift is visible without any AI and without root.
+
+Neither mode makes security decisions on its own: the gate owns artifact
+verdicts, and posture reports facts plus a fix.
 """
 
 from __future__ import annotations
@@ -16,10 +22,13 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+
+VERSION = "2.0"
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 
@@ -306,7 +315,7 @@ def print_session(session: dict) -> None:
     verdict = session.get("verdict", "?")
     counts = session.get("counts", {})
     print("=" * 68)
-    print(f" KIMSCANNING v1   |   {verdict}")
+    print(f" KIMSCANNING {VERSION}   |   {verdict}")
     print("=" * 68)
     print(f"Session   : {session.get('id')}")
     print(f"Kind      : {session.get('kind')}  ({session.get('profile')})")
@@ -369,7 +378,84 @@ def print_session(session: dict) -> None:
     print("\n  Mark an action: kimscan status %s <number> accepted" % session.get("id"))
 
 
-def write_report(session: dict, path: str) -> None:
+def print_posture(session: dict) -> None:
+    """Terminal view of a posture run: what was checked, found, and changed."""
+    counts = session.get("counts", {})
+    host = session.get("host") or {}
+    coverage = session.get("coverage") or {}
+    baseline = session.get("baseline") or {}
+    print("=" * 68)
+    print(f" KIMSCANNING {VERSION}   |   {session.get('verdict')}")
+    print("=" * 68)
+    print(f"Session   : {session.get('id')}")
+    print(f"Kind      : posture  ({session.get('profile')})")
+    print(
+        f"Host      : {host.get('hostname')}  (kernel {host.get('kernel')}, "
+        f"user {host.get('user')}{' — root' if host.get('user_is_root') else ''})"
+    )
+    print(f"Time      : {session.get('started')} -> {session.get('finished')}")
+    print(
+        f"Coverage  : {coverage.get('evaluated', 0)} of "
+        f"{coverage.get('checks', 0)} checks evaluated"
+    )
+    for rec in coverage.get("skipped_checks") or []:
+        print(f"            - {rec.get('name')}: {rec.get('reason')}")
+    print(
+        "Checks    : "
+        + "  ".join(
+            f"{r.get('name')}={r.get('status')}" for r in session.get("scanners", [])
+        )
+    )
+    print(
+        "Counts    : "
+        f"critical={counts.get('critical', 0)} "
+        f"high={counts.get('high', 0)} "
+        f"medium={counts.get('medium', 0)} "
+        f"low={counts.get('low', 0)} "
+        f"info={counts.get('info', 0)}"
+    )
+
+    findings = session.get("findings", [])
+    print(f"\nFINDINGS ({len(findings)}):")
+    if not findings:
+        print("  Nothing above the noise floor in the checks that ran.")
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    for n, f in enumerate(
+        sorted(findings, key=lambda x: (order.get(str(x.get("severity")), 9), str(x.get("key")))),
+        1,
+    ):
+        print(f"  [{n}] [{str(f.get('severity')).upper()}] {f.get('rule')}/{f.get('key')}")
+        print(f"      WHAT    : {f.get('what', '')}")
+        print(f"      WHY     : {f.get('why', '')}")
+        print(f"      FIX     : {f.get('fix', '')}")
+        if f.get("detail"):
+            print(f"      WHERE   : {f.get('detail')}")
+
+    print("\nBASELINE:")
+    if not baseline.get("present"):
+        print("  none yet — save the current state with: kimscan posture --accept")
+    else:
+        print(
+            f"  saved {baseline.get('saved')} by {baseline.get('user')} "
+            f"({baseline.get('items', 0)} item(s))"
+        )
+        drift = session.get("drift") or []
+        if not drift:
+            print("  no drift: this run matches the saved baseline")
+        else:
+            print(
+                f"  drift: {baseline.get('new', 0)} new, "
+                f"{baseline.get('changed', 0)} changed, "
+                f"{baseline.get('gone', 0)} gone"
+            )
+            for d in drift:
+                mark = {"new": "+", "gone": "-", "changed": "~"}.get(d.get("kind"), "?")
+                print(f"    {mark} {d.get('key')}  [{d.get('severity') or '-'}] {d.get('detail', '')}")
+    print("\n  Markdown: kimscan report %s" % session.get("id"))
+
+
+def report_text(session: dict) -> str:
+    """Markdown report for one session (artifact scan or posture run)."""
     counts = session.get("counts", {})
     lines = [
         "# KimScanning Report",
@@ -419,6 +505,51 @@ def write_report(session: dict, path: str) -> None:
             f"{'-' if rc is None else rc} | {reason} |"
         )
 
+    if session.get("kind") == "posture":
+        host = session.get("host") or {}
+        lines += [
+            "",
+            "## Host",
+            "",
+            f"**Hostname:** `{host.get('hostname') or '-'}`  ",
+            f"**Kernel:** `{host.get('kernel') or '-'}`  ",
+            f"**User:** `{host.get('user') or '-'}`"
+            f"{' (root)' if host.get('user_is_root') else ''}  ",
+        ]
+        coverage = session.get("coverage") or {}
+        lines += [
+            "",
+            "## Coverage",
+            "",
+            f"{coverage.get('evaluated', 0)} of {coverage.get('checks', 0)} checks "
+            f"evaluated, {coverage.get('skipped', 0)} not evaluated.",
+            "",
+        ]
+        for rec in coverage.get("skipped_checks") or []:
+            lines.append(f"- `{rec.get('name')}` — {rec.get('reason')}")
+        baseline = session.get("baseline") or {}
+        lines += ["", "## Drift since baseline", ""]
+        if not baseline.get("present"):
+            lines.append("_No baseline yet. Run `kimscan posture --accept`._")
+        elif not session.get("drift"):
+            lines.append("_No drift: the host matches the saved baseline._")
+        else:
+            lines += [
+                f"Baseline saved `{baseline.get('saved')}` by "
+                f"`{baseline.get('user')}` — {baseline.get('new', 0)} new, "
+                f"{baseline.get('changed', 0)} changed, "
+                f"{baseline.get('gone', 0)} gone.",
+                "",
+                "| Change | Key | Severity | Detail |",
+                "|---|---|---|---|",
+            ]
+            for d in session.get("drift", []):
+                detail = str(d.get("detail", "")).replace("|", "/")
+                lines.append(
+                    f"| {d.get('kind')} | `{d.get('key')}` | "
+                    f"{d.get('severity') or '-'} | {detail} |"
+                )
+
     findings = session.get("findings", [])
     lines += ["", f"## Findings ({len(findings)})", ""]
     if not findings:
@@ -462,9 +593,13 @@ def write_report(session: dict, path: str) -> None:
                         "- **FIX:** [no explanation]",
                     ]
                 lines += [f"- **Evidence:** {f.get('evidence', '')}", ""]
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def write_report(session: dict, path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines).rstrip() + "\n")
+        fh.write(report_text(session))
 
 
 # ----------------------------------------------------------------- scanning
@@ -909,7 +1044,807 @@ def run_scan(kind: str, argv: list) -> int:
     return code
 
 
+# ---------------------------------------------------------------- posture
+#
+# Posture runs as the logged-in user, reads only files that are readable
+# without root, and says so when a check could not be evaluated. That is the
+# point of the mirror: never claim "clean" for something it could not see.
+
+SYSROOT = os.environ.get("KIMSCAN_POSTURE_ROOT") or "/"
+SS_FIXTURE = os.environ.get("KIMSCAN_POSTURE_SS") or ""
+MIN_AUDIT_WATCHES = 8
+SEV_RANK_ANY = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# Ports that are dangerous when reachable from the network. A plain wildcard
+# listener is only "low"; these carry their own reason.
+RISKY_PORTS = {
+    21: ("medium", "FTP sends the password in clear text."),
+    23: ("high", "Telnet sends everything, including the password, in clear text."),
+    111: ("medium", "rpcbind exposes RPC services to whoever can reach the port."),
+    445: ("high", "SMB is a common lateral-movement and ransomware target."),
+    2375: ("high", "The Docker API without TLS lets anyone start containers as root."),
+    3306: ("medium", "A database port reachable from the network widens the attack surface."),
+    3389: ("medium", "RDP is a frequent target for password spraying."),
+    5432: ("medium", "A database port reachable from the network widens the attack surface."),
+    5900: ("medium", "VNC is often unauthenticated or weakly authenticated."),
+}
+
+SYSCTL_EXPECT = [
+    ("kernel.kptr_restrict", 1, "kernel addresses are readable by unprivileged users"),
+    ("kernel.dmesg_restrict", 1, "the kernel log is readable by unprivileged users"),
+    ("kernel.yama.ptrace_scope", 1, "any process of the same user can be traced and read"),
+    ("fs.protected_hardlinks", 1, "hardlink attacks against files you own are possible"),
+    ("fs.protected_symlinks", 1, "symlink attacks in world-writable directories are possible"),
+    ("net.ipv4.conf.all.accept_redirects", 0, "the host accepts ICMP redirects"),
+]
+
+
+def sys_path(*parts) -> str:
+    """Path below the posture root (``/`` normally, a fixture in tests)."""
+    return os.path.join(SYSROOT, *parts)
+
+
+def _run(cmd, timeout=10):
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 127, str(exc)
+
+
+def _read(path: str, limit: int = 1_000_000):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read(limit)
+    except OSError:
+        return None
+
+
+def posture_item(check, key, severity, what, why, fix, detail=""):
+    return {
+        "tool": "posture",
+        "rule": check,
+        "key": key,
+        "severity": severity,
+        "what": what,
+        "why": why,
+        "fix": fix,
+        "detail": detail,
+    }
+
+
+def check_auditd_service():
+    if SYSROOT != "/":
+        return [], {"name": "auditd", "status": "skipped",
+                    "reason": "fixture root: service state is not simulated"}
+    _rc, out = _run(["systemctl", "is-active", "auditd"])
+    state = out.strip().splitlines()[0].strip() if out.strip() else "no answer"
+    if state != "active":
+        return [posture_item(
+            "auditd", "service:auditd", "high",
+            "The audit daemon is not running.",
+            "No auditd means no etc_watch and no privilege-change record; "
+            "KimLogPipe can only read journald, so file changes go unseen.",
+            "sudo systemctl enable --now auditd",
+            f"systemctl is-active auditd -> {state}",
+        )], {"name": "auditd", "status": "done", "reason": f"state={state}"}
+    return [], {"name": "auditd", "status": "done", "reason": f"state={state}"}
+
+
+def check_audit_rules():
+    items = []
+    rules_dir = sys_path("etc", "audit", "rules.d")
+    try:
+        names = sorted(n for n in os.listdir(rules_dir) if n.endswith(".rules"))
+    except OSError:
+        return items, {"name": "audit-rules", "status": "skipped",
+                       "reason": f"{rules_dir} is not readable"}
+    watches, unreadable = 0, []
+    for name in names:
+        text = _read(os.path.join(rules_dir, name))
+        if text is None:
+            unreadable.append(name)
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith(("-w ", "-a ", "-A ")):
+                watches += 1
+    if unreadable and not watches:
+        return items, {"name": "audit-rules", "status": "skipped",
+                       "reason": "rule file(s) not readable: " + ", ".join(unreadable)}
+    if watches < MIN_AUDIT_WATCHES:
+        items.append(posture_item(
+            "audit-rules", "audit:watches", "medium",
+            f"Only {watches} audit watch rule(s) are installed.",
+            "etc_watch needs watches on the identity files; without them a "
+            "change to /etc/passwd, /etc/shadow or /etc/sudoers leaves no trace "
+            "for KimLogPipe to report.",
+            "Restore /etc/audit/rules.d/kimrity.rules from the installer (or "
+            "the ISO), then run: sudo augenrules --load",
+            f"{watches} rule(s) in {len(names)} file(s) under {rules_dir}",
+        ))
+    log_group = ""
+    conf = _read(sys_path("etc", "audit", "auditd.conf"))
+    if conf is not None:
+        for line in conf.splitlines():
+            if line.strip().startswith("log_group"):
+                log_group = line.split("=", 1)[-1].strip()
+                break
+        if log_group and log_group != "systemd-journal":
+            items.append(posture_item(
+                "audit-rules", "audit:log_group", "medium",
+                f"The audit log is owned by group '{log_group}', not 'systemd-journal'.",
+                "KimLogPipe runs as your user and needs the log group to read "
+                "/var/log/audit/audit.log; with the wrong group etc_watch is "
+                "silently unavailable.",
+                "Set 'log_group = systemd-journal' in /etc/audit/auditd.conf, "
+                "then: sudo systemctl kill -s HUP auditd",
+                f"log_group = {log_group}",
+            ))
+    detail = f"{watches} watch rule(s)"
+    if conf is None:
+        detail += "; auditd.conf not readable (needs root)"
+    return items, {"name": "audit-rules", "status": "done", "reason": detail}
+
+
+def check_pipeline():
+    if SYSROOT != "/" or not os.environ.get("XDG_RUNTIME_DIR"):
+        return [], {"name": "pipeline", "status": "skipped",
+                    "reason": "no user session to inspect"}
+    items = []
+    run_dir = os.environ["XDG_RUNTIME_DIR"]
+    states = {}
+    for unit, role in (("kimai", "approval broker"), ("kimlogpipe", "log pipeline")):
+        _rc, out = _run(["systemctl", "--user", "is-active", unit])
+        state = out.strip().splitlines()[0].strip() if out.strip() else "no answer"
+        states[unit] = state
+        if state != "active":
+            items.append(posture_item(
+                "pipeline", f"service:{unit}", "medium",
+                f"{unit}.service ({role}) is not running.",
+                "Without both user services the host stops explaining itself: "
+                "findings are recorded but nothing is delivered for approval.",
+                f"systemctl --user enable --now {unit}.service",
+                f"systemctl --user is-active {unit} -> {state}",
+            ))
+    sock = os.path.join(run_dir, "kimai.sock")
+    try:
+        st = os.stat(sock)
+    except OSError:
+        if states.get("kimai") == "active":
+            items.append(posture_item(
+                "pipeline", "socket:kimai", "high",
+                "KimAI is running but its socket is missing.",
+                "KimLogPipe delivers events over this socket; without it every "
+                "finding falls back to tools-only mode.",
+                "Check the KimAI log: journalctl --user -u kimai -n 40",
+                f"{sock} does not exist",
+            ))
+    else:
+        mode = stat.S_IMODE(st.st_mode)
+        if mode != 0o600:
+            items.append(posture_item(
+                "pipeline", "socket:kimai-mode", "high",
+                f"The KimAI socket mode is {mode:04o}, not 0600.",
+                "The socket is the trust boundary: 0600 plus SO_PEERCRED is "
+                "what stops other local users from feeding the broker.",
+                "chmod 600 " + sock,
+                f"mode {mode:04o}",
+            ))
+        if st.st_uid != os.getuid():
+            items.append(posture_item(
+                "pipeline", "socket:kimai-owner", "high",
+                "The KimAI socket is owned by another user.",
+                "A socket owned by someone else means the broker you talk to is "
+                "not the one your session started.",
+                "Remove the stale socket and restart KimAI: systemctl --user restart kimai",
+                f"uid {st.st_uid} != {os.getuid()}",
+            ))
+    return items, {"name": "pipeline", "status": "done",
+                   "reason": " ".join(f"{k}={v}" for k, v in states.items())}
+
+
+def _ss_lines():
+    if SS_FIXTURE:
+        text = _read(SS_FIXTURE)
+        return (text or "").splitlines()
+    rc, out = _run(["ss", "-ltnH"])
+    if rc != 0:
+        return None
+    return out.splitlines()
+
+
+def check_listeners():
+    lines = _ss_lines()
+    if lines is None:
+        return [], {"name": "listeners", "status": "skipped",
+                    "reason": "ss is not available"}
+    items = []
+    wildcard = 0
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        local = parts[3]
+        host, _, port_text = local.rpartition(":")
+        try:
+            port = int(port_text)
+        except ValueError:
+            continue
+        host = host.strip("[]")
+        if host in ("127.0.0.1", "::1", "localhost"):
+            continue
+        if host not in ("0.0.0.0", "::", "*"):
+            continue
+        wildcard += 1
+        severity, why = RISKY_PORTS.get(
+            port,
+            ("low", "Any host that can reach this machine can connect to this port."),
+        )
+        name = ""
+        try:
+            import socket as _socket  # local import: only used for a label
+            name = _socket.getservbyport(port, "tcp")
+        except OSError:
+            pass
+        # [::] keeps its brackets in the key: listen:[::]:22 reads as an
+        # address, listen::::22 does not.
+        label = f"[{host}]" if ":" in host else host
+        items.append(posture_item(
+            "listeners", f"listen:{label}:{port}", severity,
+            f"A service listens on every interface, port {port}"
+            f"{' (' + name + ')' if name else ''}.",
+            why,
+            "Bind the service to 127.0.0.1 if only local programs need it, or "
+            "close the port with the firewall.",
+            f"{local} (ss -ltn)",
+        ))
+    return items, {"name": "listeners", "status": "done",
+                   "reason": f"{wildcard} wildcard listener(s)"}
+
+
+def _sshd_values():
+    main = _read(sys_path("etc", "ssh", "sshd_config"))
+    if main is None:
+        return None
+    text = main
+    dropin = sys_path("etc", "ssh", "sshd_config.d")
+    try:
+        for name in sorted(os.listdir(dropin)):
+            if name.endswith(".conf"):
+                part = _read(os.path.join(dropin, name))
+                if part:
+                    text += "\n" + part
+    except OSError:
+        pass
+    values = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = stripped.split(None, 1)
+        if len(parts) == 2:
+            # sshd keeps the FIRST value it reads.
+            values.setdefault(parts[0].lower(), parts[1].strip())
+    return values
+
+
+def check_sshd():
+    values = _sshd_values()
+    if values is None:
+        return [], {"name": "sshd", "status": "skipped",
+                    "reason": "openssh-server is not installed"}
+    items = []
+    root_login = values.get("permitrootlogin", "prohibit-password").lower()
+    if root_login == "yes":
+        items.append(posture_item(
+            "sshd", "sshd:permitrootlogin", "high",
+            "SSH allows the root account to log in with a password.",
+            "A guessed root password hands over the whole machine, and root "
+            "logins defeat the point of a personal account with sudo.",
+            "Set 'PermitRootLogin prohibit-password' in /etc/ssh/sshd_config "
+            "and restart sshd.",
+            f"PermitRootLogin {root_login}",
+        ))
+    password_auth = values.get("passwordauthentication", "yes").lower()
+    if password_auth == "yes":
+        items.append(posture_item(
+            "sshd", "sshd:passwordauthentication", "medium",
+            "SSH accepts passwords.",
+            "Passwords can be guessed over the network; keys cannot. KimLogPipe "
+            "detects the brute force, but detection is not prevention.",
+            "Use keys, then set 'PasswordAuthentication no' and restart sshd.",
+            f"PasswordAuthentication {password_auth}",
+        ))
+    if values.get("permitemptypasswords", "no").lower() == "yes":
+        items.append(posture_item(
+            "sshd", "sshd:permitemptypasswords", "high",
+            "SSH accepts accounts with an empty password.",
+            "An empty password is not a password: anyone who knows the username gets in.",
+            "Set 'PermitEmptyPasswords no' and restart sshd.",
+            "PermitEmptyPasswords yes",
+        ))
+    return items, {"name": "sshd", "status": "done",
+                   "reason": f"permitrootlogin={root_login}"}
+
+
+def _account_lines():
+    text = _read(sys_path("etc", "passwd"))
+    if text is None:
+        return None
+    rows = []
+    for line in text.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 4:
+            rows.append(parts)
+    return rows
+
+
+def check_accounts():
+    rows = _account_lines()
+    if rows is None:
+        return [], {"name": "accounts", "status": "skipped",
+                    "reason": "/etc/passwd is not readable"}
+    items = []
+    for parts in rows:
+        name, password, uid = parts[0], parts[1], parts[2]
+        if uid == "0" and name != "root":
+            items.append(posture_item(
+                "accounts", f"account:uid0:{name}", "critical",
+                f"Account '{name}' has UID 0 (root privileges).",
+                "UID 0 is root; a second UID 0 account is a hidden backdoor that "
+                "keeps working after the root password is changed.",
+                "Remove the account or change its UID: sudo usermod -u <new-uid> " + name,
+                f"{name}:x:{uid}:...",
+            ))
+        if password == "":
+            items.append(posture_item(
+                "accounts", f"account:emptypass:{name}", "critical",
+                f"Account '{name}' has an empty password field.",
+                "An empty password field lets anyone log in as this account "
+                "without a secret.",
+                "Lock the account: sudo passwd -l " + name,
+                f"{name}::... in /etc/passwd",
+            ))
+    return items, {"name": "accounts", "status": "done",
+                   "reason": f"{len(rows)} account(s)"}
+
+
+def check_shadow():
+    text = _read(sys_path("etc", "shadow"))
+    if text is None:
+        return [], {"name": "shadow", "status": "skipped",
+                    "reason": "needs root to read /etc/shadow"}
+    items = []
+    for line in text.splitlines():
+        parts = line.split(":")
+        if len(parts) >= 2 and parts[1] == "":
+            items.append(posture_item(
+                "shadow", f"account:no-hash:{parts[0]}", "critical",
+                f"Account '{parts[0]}' has no password hash.",
+                "An empty hash means the login succeeds without a password.",
+                "Lock the account or set a password: sudo passwd -l " + parts[0],
+                f"{parts[0]}:<empty>:...",
+            ))
+    return items, {"name": "shadow", "status": "done",
+                   "reason": f"{len(text.splitlines())} hash line(s)"}
+
+
+def check_sudoers():
+    files = [sys_path("etc", "sudoers")]
+    dropin = sys_path("etc", "sudoers.d")
+    try:
+        files += [os.path.join(dropin, n) for n in sorted(os.listdir(dropin))]
+    except OSError:
+        pass
+    readable, hits, unreadable = [], [], []
+    for path in files:
+        if not os.path.isfile(path):
+            continue
+        text = _read(path)
+        if text is None:
+            unreadable.append(os.path.basename(path))
+            continue
+        readable.append(os.path.basename(path))
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if "nopasswd" in stripped.lower():
+                hits.append(stripped[:120])
+    if not readable:
+        return [], {"name": "sudoers", "status": "skipped",
+                    "reason": "needs root to read /etc/sudoers and /etc/sudoers.d"}
+    items = []
+    for line in hits:
+        items.append(posture_item(
+            "sudoers", f"sudoers:nopasswd:{line.split()[0]}", "medium",
+            "A sudo rule runs without asking for a password.",
+            "NOPASSWD turns any process running as your user into root, which "
+            "is how a small compromise becomes a full one.",
+            "Remove NOPASSWD unless it is a deliberate, time-limited grant.",
+            line,
+        ))
+    return items, {"name": "sudoers", "status": "done",
+                   "reason": f"{len(readable)} file(s) readable"}
+
+
+def check_path():
+    items = []
+    seen = set()
+    for entry in os.environ.get("PATH", "").split(":"):
+        if not entry or entry in seen:
+            continue
+        seen.add(entry)
+        try:
+            st = os.stat(entry)
+        except OSError:
+            continue
+        mode = stat.S_IMODE(st.st_mode)
+        if mode & 0o002 and not mode & 0o1000:
+            items.append(posture_item(
+                "path", f"path:worldwritable:{entry}", "high",
+                f"Directory '{entry}' is in PATH and is world-writable.",
+                "Anyone who can write there can replace a command your shell or "
+                "an admin script will run next.",
+                f"chmod o-w {entry}",
+                f"mode {mode:04o}",
+            ))
+    return items, {"name": "path", "status": "done",
+                   "reason": f"{len(seen)} dir(s)"}
+
+
+def check_sysctl():
+    checked, missing, items = 0, 0, []
+    for name, wanted, why in SYSCTL_EXPECT:
+        path = sys_path("proc", "sys", *name.split("."))
+        text = _read(path)
+        if text is None:
+            missing += 1
+            continue
+        try:
+            value = int(text.strip())
+        except ValueError:
+            missing += 1
+            continue
+        checked += 1
+        weak = value < wanted if wanted == 1 else value != wanted
+        if weak:
+            items.append(posture_item(
+                "sysctl", f"sysctl:{name}", "low",
+                f"{name} = {value}.",
+                why + ".",
+                f"Set it: sudo sysctl -w {name}={wanted} (persist it in "
+                "/etc/sysctl.d/99-kimrity.conf)",
+                f"{name}={value}, expected {'>=' if wanted == 1 else '='}{wanted}",
+            ))
+    if checked == 0:
+        return [], {"name": "sysctl", "status": "skipped",
+                    "reason": "no readable values under /proc/sys"}
+    return items, {"name": "sysctl", "status": "done",
+                   "reason": f"{checked} value(s), {missing} unavailable"}
+
+
+def check_filesystem():
+    items = []
+    checked = 0
+    for target in ("/tmp", "/var/tmp", "/dev/shm"):
+        try:
+            st = os.stat(sys_path(target.lstrip("/")))
+        except OSError:
+            continue
+        checked += 1
+        mode = stat.S_IMODE(st.st_mode)
+        if mode & 0o002 and not mode & 0o1000:
+            items.append(posture_item(
+                "filesystem", f"fs:worldwritable:{target}", "high",
+                f"{target} is world-writable without the sticky bit.",
+                "Without the sticky bit any user can delete or replace files "
+                "that belong to someone else.",
+                f"sudo chmod +t {target}",
+                f"mode {mode:04o}",
+            ))
+    if checked == 0:
+        return [], {"name": "filesystem", "status": "skipped",
+                    "reason": "no temporary directories found"}
+    return items, {"name": "filesystem", "status": "done",
+                   "reason": f"{checked} dir(s)"}
+
+
+def check_disk():
+    if SYSROOT != "/":
+        return [], {"name": "disk", "status": "skipped",
+                    "reason": "fixture root: block devices are not simulated"}
+    _rc, source = _run(["findmnt", "-n", "-o", "SOURCE", "/"])
+    source = source.strip().splitlines()[0].strip() if source.strip() else ""
+    encrypted = source.startswith("/dev/mapper/") or "/dev/dm-" in source
+    if not encrypted:
+        _rc, types = _run(["lsblk", "-rno", "TYPE"])
+        encrypted = any(line.strip() == "crypt" for line in types.splitlines())
+    if encrypted:
+        return [], {"name": "disk", "status": "done", "reason": f"root={source} (encrypted)"}
+    return [posture_item(
+        "disk", "disk:root-unencrypted", "info",
+        "The root filesystem is not on an encrypted device.",
+        "Anyone with physical access can read or modify the disk, including "
+        "the KimAI events and the audit trail.",
+        "Plan LUKS for the next install; nothing to do on this running system.",
+        f"findmnt -o SOURCE / -> {source or 'unknown'}",
+    )], {"name": "disk", "status": "done", "reason": f"root={source or 'unknown'}"}
+
+
+POSTURE_CHECKS = [
+    check_auditd_service,
+    check_audit_rules,
+    check_pipeline,
+    check_listeners,
+    check_sshd,
+    check_accounts,
+    check_shadow,
+    check_sudoers,
+    check_path,
+    check_sysctl,
+    check_filesystem,
+    check_disk,
+]
+
+
+def baseline_file() -> str:
+    return os.path.join(data_root(), "posture", "baseline.json")
+
+
+def load_baseline() -> dict:
+    data = read_json(baseline_file())
+    return data if isinstance(data, dict) else {}
+
+
+def posture_map(items) -> dict:
+    return {
+        str(i.get("key")): {
+            "severity": str(i.get("severity")),
+            "what": str(i.get("what", "")),
+        }
+        for i in items
+    }
+
+
+def posture_diff(current: dict, saved: dict) -> list:
+    drift = []
+    for key in sorted(set(current) - set(saved)):
+        drift.append({"kind": "new", "key": key,
+                      "severity": current[key]["severity"],
+                      "detail": current[key]["what"]})
+    for key in sorted(set(saved) - set(current)):
+        drift.append({"kind": "gone", "key": key,
+                      "severity": saved[key].get("severity", ""),
+                      "detail": saved[key].get("what", "")})
+    for key in sorted(set(current) & set(saved)):
+        if current[key]["severity"] != saved[key].get("severity"):
+            drift.append({
+                "kind": "changed", "key": key,
+                "severity": current[key]["severity"],
+                "detail": f"{saved[key].get('severity')} -> {current[key]['severity']}",
+            })
+    return drift
+
+
+def posture_verdict(items, records, fail_on: str, strict: bool) -> str:
+    threshold = SEV_RANK_ANY[fail_on]
+    severities = [str(i.get("severity", "info")).lower() for i in items]
+    if any(SEV_RANK_ANY.get(s, 4) <= threshold for s in severities):
+        return "FAIL"
+    if "medium" in severities:
+        return "CONDITIONAL"
+    if strict and any(r.get("status") == "skipped" for r in records):
+        return "CONDITIONAL"
+    return "PASS"
+
+
 # ---------------------------------------------------------------- commands
+
+def latest_session():
+    sessions = all_sessions()
+    if not sessions:
+        return None
+    sessions.sort(key=lambda s: (str(s.get("started") or ""), str(s.get("id") or "")))
+    return sessions[-1]
+
+
+def cmd_posture(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan posture", add_help=False)
+    parser.add_argument("--accept", "--baseline", dest="accept", action="store_true")
+    parser.add_argument("--show-baseline", action="store_true")
+    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--fail-on", choices=["critical", "high", "medium"], default="high")
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+
+    if args.help:
+        print(
+            "Usage: kimscan posture [--accept] [--show-baseline] [--strict] "
+            "[--json] [--fail-on critical|high|medium]\n"
+            "\n"
+            "Inspect this host without root: auditd, audit watches, the KimAI\n"
+            "pipeline, wildcard listeners, sshd, accounts, sudoers, PATH,\n"
+            "sysctl and temporary directories.\n"
+            "\n"
+            "  --accept          save the current state as the baseline\n"
+            "  --show-baseline   print the saved baseline without scanning\n"
+            "  --strict          incomplete coverage (a skipped check) makes\n"
+            "                    the verdict CONDITIONAL instead of PASS\n"
+            "\n"
+            "Checks that need root (shadow hashes, sudoers) are reported as\n"
+            "not evaluated — never as clean.\n"
+            "\n"
+            "Baseline: $XDG_DATA_HOME/kimscanning/posture/baseline.json"
+        )
+        return 0
+
+    if args.show_baseline:
+        base = load_baseline()
+        if not base:
+            print("No baseline yet. Save one with: kimscan posture --accept")
+            return 0
+        items = base.get("items") or {}
+        print(f"Baseline: {baseline_file()}")
+        print(f"Saved   : {base.get('saved')} by {base.get('user')} on {base.get('host')}")
+        print(f"Items   : {len(items)}")
+        for key in sorted(items):
+            print(f"  [{items[key].get('severity')}] {key}")
+        return 0
+
+    sid = new_session_id()
+    started = now_iso()
+    records, items = [], []
+    for check in POSTURE_CHECKS:
+        found, record = check()
+        items.extend(found)
+        records.append(record)
+    finished = now_iso()
+
+    counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+    for item in items:
+        severity = str(item.get("severity", "info")).lower()
+        counts[severity] = counts.get(severity, 0) + 1
+
+    skipped = [r for r in records if r.get("status") == "skipped"]
+    user = getpass.getuser() if hasattr(getpass, "getuser") else os.environ.get("USER", "?")
+    uname = os.uname()
+
+    current = posture_map(items)
+    base = load_baseline()
+    saved_items = base.get("items") if isinstance(base.get("items"), dict) else {}
+    drift = posture_diff(current, saved_items) if saved_items else []
+    baseline_info = {
+        "present": bool(saved_items),
+        "saved": base.get("saved", ""),
+        "user": base.get("user", ""),
+        "items": len(saved_items),
+        "new": sum(1 for d in drift if d["kind"] == "new"),
+        "changed": sum(1 for d in drift if d["kind"] == "changed"),
+        "gone": sum(1 for d in drift if d["kind"] == "gone"),
+    }
+
+    verdict = posture_verdict(items, records, args.fail_on, args.strict)
+    session = {
+        "id": sid,
+        "kind": "posture",
+        "target": uname.nodename,
+        "profile": "posture-local",
+        "authorized": {"granted": False, "who": user, "when": started, "scope": None},
+        "started": started,
+        "finished": finished,
+        "verdict": verdict,
+        "scanners": records,
+        "counts": counts,
+        "findings": items,
+        "host": {
+            "hostname": uname.nodename,
+            "kernel": uname.release,
+            "user": user,
+            "user_is_root": os.geteuid() == 0,
+        },
+        "coverage": {
+            "checks": len(records),
+            "evaluated": len(records) - len(skipped),
+            "skipped": len(skipped),
+            "skipped_checks": skipped,
+        },
+        "baseline": baseline_info,
+        "drift": drift,
+    }
+
+    sdir = os.path.join(sessions_root(), sid)
+    try:
+        os.makedirs(sdir, exist_ok=True)
+        write_json(os.path.join(sdir, "session.json"), session)
+        write_report(session, os.path.join(sdir, "report.md"))
+    except OSError as exc:
+        return fail(f"cannot store the session: {exc}")
+
+    had_previous = bool(saved_items)
+    if args.accept:
+        try:
+            os.makedirs(os.path.dirname(baseline_file()), exist_ok=True)
+            write_json(baseline_file(), {
+                "saved": finished,
+                "user": user,
+                "host": uname.nodename,
+                "kernel": uname.release,
+                "items": current,
+            })
+        except OSError as exc:
+            return fail(f"cannot write the baseline: {exc}")
+        baseline_info.update({"present": True, "saved": finished,
+                              "user": user, "items": len(current)})
+        session["baseline"] = baseline_info
+
+    if args.json:
+        print(json.dumps(session, ensure_ascii=False, indent=2))
+    else:
+        print_posture(session)
+        if args.accept:
+            print("\nBASELINE SAVED")
+            if had_previous:
+                print(f"  {len(current)} item(s): {baseline_info['new']} new, "
+                      f"{baseline_info['changed']} changed, "
+                      f"{baseline_info['gone']} gone since the previous baseline")
+            else:
+                print(f"  {len(current)} item(s) — first baseline "
+                      "(nothing to compare against yet)")
+            for d in drift:
+                mark = {"new": "+", "gone": "-", "changed": "~"}.get(d.get("kind"), "?")
+                print(f"    {mark} {d.get('key')}  [{d.get('severity') or '-'}]")
+            print("  Accepted state is now the reference for the next run.")
+    return VERDICT_EXIT.get(verdict, 3)
+
+
+def cmd_report(argv: list) -> int:
+    parser = argparse.ArgumentParser(prog="kimscan report", add_help=False)
+    parser.add_argument("id", nargs="?")
+    parser.add_argument("--out", default=None)
+    parser.add_argument("-h", "--help", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        return 1
+    if args.help:
+        print(
+            "Usage: kimscan report [<id>] [--out PATH]\n"
+            "\n"
+            "Print the markdown report for one session, or the newest session\n"
+            "when no id is given. --out writes it to a file instead of stdout.\n"
+            "Every session already has report.md next to its session.json."
+        )
+        return 0
+    if args.id:
+        session, err = find_session(args.id)
+        if session is None:
+            return fail(err or "session not found")
+    else:
+        session = latest_session()
+        if session is None:
+            return fail("no sessions yet — run: kimscan posture  (or kimscan repo <folder>)")
+    text = report_text(session)
+    if args.out:
+        path = os.path.abspath(args.out)
+        if os.path.isdir(path):
+            path = os.path.join(path, f"{session['id']}.md")
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as exc:
+            return fail(f"cannot write the report: {exc}")
+        print(f"Report written: {path}")
+    else:
+        print(text, end="")
+    return 0
+
 
 def cmd_list(argv: list) -> int:
     parser = argparse.ArgumentParser(prog="kimscan list", add_help=False)
@@ -953,6 +1888,8 @@ def cmd_show(argv: list) -> int:
         return fail(err or "session not found")
     if args.json:
         print(json.dumps(session, ensure_ascii=False, indent=2))
+    elif session.get("kind") == "posture":
+        print_posture(session)
     else:
         print_session(session)
     return 0
@@ -1109,7 +2046,8 @@ def print_scan_help(kind: str) -> None:
 
 def print_help() -> None:
     print(
-        """KimScanning v1 — terminal scanner driven by the KimRity Security Gate
+        f"""KimScanning {VERSION} — terminal scanner driven by the KimRity Security Gate,
+plus a local posture mirror for the running host.
 
 USAGE:
   kimscan repo <folder> [--scope S] [--json] [--fail-on T]
@@ -1117,6 +2055,8 @@ USAGE:
   kimscan installer <path> [--json] [--fail-on T]
   kimscan web <url> --authorized [--scope S] [--json] [--fail-on T]
   kimscan server <host> --authorized [--scope S] [--json] [--fail-on T]
+  kimscan posture [--accept] [--show-baseline] [--strict] [--json]
+  kimscan report [<id>] [--out PATH]
   kimscan list
   kimscan show <id> [--json]
   kimscan status <id> <fp> new|accepted|fixed
@@ -1130,6 +2070,9 @@ EXAMPLES:
   kimscan file ./settings.py
   kimscan installer ./install.sh
   kimscan web https://127.0.0.1 --authorized --scope scope.txt
+  kimscan posture
+  kimscan posture --accept
+  kimscan report --out ~/reports
   kimscan show 20261028T120000Z
   kimscan status 20261028T120000Z a1b2c3d4e5f6 accepted
   kimscan rules --missing
@@ -1142,7 +2085,9 @@ EXIT CODES:
 
 Sessions are stored under $XDG_DATA_HOME/kimscanning/sessions/
 (default: ~/.local/share/kimscanning/sessions/).
+The posture baseline lives in $XDG_DATA_HOME/kimscanning/posture/baseline.json.
 Finding explanations come from the static rules/en.yaml dictionary — no AI.
+Posture findings carry their own what/why/fix text — also no AI.
 """
     )
 
@@ -1155,6 +2100,10 @@ def main(argv=None) -> int:
     cmd, rest = argv[0], argv[1:]
     if cmd in EXPECTED:
         return run_scan(cmd, rest)
+    if cmd == "posture":
+        return cmd_posture(rest)
+    if cmd == "report":
+        return cmd_report(rest)
     if cmd == "list":
         return cmd_list(rest)
     if cmd == "show":

@@ -97,6 +97,9 @@ bind("SUPER + E", "File manager", "kitty yazi")
 bind("SUPER + B", "Browser", "firefox")
 bind("SUPER + C", "Calculator", "qalculate-gtk")
 bind("SUPER + N", "Editor", "kitty -e nvim")
+-- KimScanning: the host's own mirror. --hold keeps the window open after the
+-- report is printed, so the finding you just read does not disappear.
+bind("SUPER + SHIFT + K", "Security posture", "kitty --hold -e kimscan posture")
 
 -- --- workspace presets (F1/F2/F3 macro via workspace-launch) ---
 bind("SUPER + F1", "Preset F1", "~/.local/bin/workspace-launch F1")

@@ -124,6 +124,89 @@ for t in gitleaks semgrep trivy; do
     command -v "$t" >/dev/null 2>&1 || HAVE_REPO_TOOLS=0
 done
 
+section "P1. posture: clean fixture -> PASS, baseline, drift"
+FX="$TMP/fx"
+mkdir -p "$FX/etc/audit/rules.d" "$FX/etc/ssh" "$FX/etc/sudoers.d" \
+  "$FX/proc/sys/kernel/yama" "$FX/proc/sys/fs" "$FX/proc/sys/net/ipv4/conf/all" \
+  "$FX/tmp" "$FX/var/tmp" "$FX/dev/shm"
+printf 'root:x:0:0:root:/root:/bin/bash\nhayqal:x:1000:1000::/home/hayqal:/bin/bash\n' >"$FX/etc/passwd"
+printf 'root:$6$h:19000::::::\nhayqal:$6$h2:19000::::::\n' >"$FX/etc/shadow"
+printf '%%wheel ALL=(ALL:ALL) ALL\n' >"$FX/etc/sudoers.d/10-wheel"
+printf 'PermitRootLogin prohibit-password\nPasswordAuthentication no\n' >"$FX/etc/ssh/sshd_config"
+for f in passwd shadow group gshadow sudoers sudoers.d sshd_config hosts systemd/system pacman.conf; do
+    echo "-w /etc/$f -p wa -k etc_watch"
+done >"$FX/etc/audit/rules.d/kimrity.rules"
+printf 'log_group = systemd-journal\n' >"$FX/etc/audit/auditd.conf"
+echo 1 >"$FX/proc/sys/kernel/kptr_restrict"
+echo 1 >"$FX/proc/sys/kernel/dmesg_restrict"
+echo 1 >"$FX/proc/sys/kernel/yama/ptrace_scope"
+echo 1 >"$FX/proc/sys/fs/protected_hardlinks"
+echo 1 >"$FX/proc/sys/fs/protected_symlinks"
+echo 0 >"$FX/proc/sys/net/ipv4/conf/all/accept_redirects"
+chmod 1777 "$FX/tmp" "$FX/var/tmp" "$FX/dev/shm"
+printf 'LISTEN 0 128 127.0.0.1:631 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n' >"$FX/ss.txt"
+
+export KIMSCAN_POSTURE_ROOT="$FX" KIMSCAN_POSTURE_SS="$FX/ss.txt"
+run "$KIMSCAN" posture
+assert_rc "posture: clean fixture is PASS" 0
+assert_contains "posture: reports host and coverage" "Coverage  :"
+if grep -Fq "[CRITICAL]" "$LAST_OUT"; then
+    bad "clean fixture produced critical findings"
+else
+    ok "clean fixture: no critical/high findings"
+fi
+run "$KIMSCAN" posture --accept
+assert_rc "posture --accept" 0
+assert_contains "posture --accept: baseline written" "BASELINE SAVED"
+assert_file "posture: baseline file exists" "$XDG_DATA_HOME/kimscanning/posture/baseline.json"
+
+# drift: one new wildcard listener, one gone
+printf 'LISTEN 0 128 127.0.0.1:631 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:8080 0.0.0.0:*\n' >"$FX/ss.txt"
+run "$KIMSCAN" posture
+assert_rc "posture: drift run still PASS (low only)" 0
+assert_contains "posture: drift counts" "drift: 1 new, 0 changed, 1 gone"
+assert_contains "posture: new key listed" "+ listen:0.0.0.0:8080"
+assert_contains "posture: gone key listed" "- listen:0.0.0.0:22"
+
+section "P2. posture: bad fixture -> FAIL with the right keys"
+printf 'evil:x:0:0::/root:/bin/sh\nnobody::65534:65534::/:/usr/bin/nologin\n' >>"$FX/etc/passwd"
+printf 'PermitRootLogin yes\nPasswordAuthentication yes\n' >"$FX/etc/ssh/sshd_config"
+printf '%%wheel ALL=(ALL:ALL) NOPASSWD: ALL\n' >"$FX/etc/sudoers.d/10-wheel"
+chmod 0777 "$FX/tmp"
+echo 0 >"$FX/proc/sys/kernel/kptr_restrict"
+run "$KIMSCAN" posture
+assert_rc "posture: bad fixture is FAIL" 3
+for key in "account:uid0:evil" "account:emptypass:nobody" \
+           "sshd:permitrootlogin" "fs:worldwritable:/tmp" "sudoers:nopasswd:%wheel"; do
+    if grep -Fq "$key" "$LAST_OUT"; then ok "posture: detects $key"; else bad "posture: missed $key"; fi
+done
+if grep -Fq "ACCOUNT 'NOBODY'" "$LAST_OUT"; then
+    bad "posture: case mangled"
+else
+    ok "posture: finding text keeps its case"
+fi
+
+section "P3. posture: --strict and report"
+run "$KIMSCAN" posture --strict
+assert_rc "posture --strict is still FAIL here" 3
+run "$KIMSCAN" posture --show-baseline
+assert_rc "posture --show-baseline" 0
+assert_contains "posture --show-baseline lists the saved key" "listen:0.0.0.0:22"
+REPORT_MD="$TMP/report.md"
+run "$KIMSCAN" report "$(last_id)" --out "$REPORT_MD"
+assert_rc "report --out" 0
+assert_file "report --out wrote the file" "$REPORT_MD"
+if grep -Fq "## Drift since baseline" "$REPORT_MD" && grep -Fq "## Coverage" "$REPORT_MD"; then
+    ok "report contains Coverage and Drift sections"
+else
+    bad "report is missing posture sections"
+fi
+run "$KIMSCAN" report
+assert_rc "report without id prints the newest session" 0
+assert_contains "report without id prints markdown" "# KimScanning Report"
+unset KIMSCAN_POSTURE_ROOT KIMSCAN_POSTURE_SS
+
+
 if [ "$HAVE_REPO_TOOLS" -ne 1 ]; then
     section "Repo scan tests skipped"
     echo "  SKIP  - gitleaks/semgrep/trivy incomplete on PATH." >&2

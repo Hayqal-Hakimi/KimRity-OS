@@ -9,6 +9,10 @@ KimScanning (`kimscan`) is a terminal scanner that checks folders, websites,
 or hosts before you trust something. It runs existing security tools and
 gives a verdict — PASS, CONDITIONAL, or FAIL.
 
+It also checks **this machine**: `kimscan posture` (section 5) reads auditd,
+the KimAI pipeline, listeners, sshd and accounts, and shows what changed
+since you saved a baseline.
+
 ## 2. Start here
 
 Try the demo first. It uses a temp folder, so your files are never touched:
@@ -101,7 +105,54 @@ verdict stays `FAIL`. Status is for your work, not for fooling the verdict.
 If the `fp` is not visible in the output, run `kimscan show <id> --json`
 and look for `"fp"`.
 
-## 5. When `--authorized` is required
+## 5. This machine's own posture
+
+Artifact scans look at files. `posture` looks at the machine you are sitting
+at — no root, no network traffic, no AI:
+
+```bash
+kimscan posture
+```
+
+It runs 12 checks: auditd and its watches, the KimAI/KimLogPipe services and
+socket, wildcard listeners, sshd, accounts, shadow hashes, sudoers, PATH,
+sysctl, temporary directories, and whether the root disk is encrypted.
+
+Some checks need root (shadow hashes, sudoers). They are reported as
+**not evaluated**, never as clean — that is the honesty rule.
+
+**Baseline and drift.** Save today's state once:
+
+```bash
+kimscan posture --accept
+```
+
+From then on every run shows what changed:
+
+```
+BASELINE:
+  saved 2026-11-14T06:16:44Z by hayqal (9 item(s))
+  drift: 1 new, 0 changed, 1 gone
+    + listen:0.0.0.0:8080  [low] A service listens on every interface, port 8080.
+    - listen:0.0.0.0:22  [low] A service listens on every interface, port 22 (ssh).
+```
+
+`--accept` also prints what it accepted, so accepting is never silent. The
+baseline lives at `~/.local/share/kimscanning/posture/baseline.json`.
+
+`--strict` turns "some checks were not evaluated" into `CONDITIONAL` instead
+of `PASS`. Use it when you need a defensible answer, not a comfortable one.
+
+On the desktop, `SUPER + SHIFT + K` opens this view in a terminal.
+
+**Report.** Every session — scan or posture — has markdown:
+
+```bash
+kimscan report              # newest session to stdout
+kimscan report <id> --out ~/reports
+```
+
+## 6. When `--authorized` is required
 
 `repo` scans your own files. No authorization needed.
 
@@ -113,13 +164,18 @@ test".
 Without `--authorized`, the tool refuses and exits with code 1. Do not
 attempt to work around it. Use `--scope` to limit targets to an allowlist.
 
-## 6. Full command list
+## 7. Full command list
 
 | Command | Use |
 |---|---|
 | `kimscan repo <folder>` | Scan a local folder/repo. |
 | `kimscan web <url> --authorized` | Scan a website. |
 | `kimscan server <host> --authorized` | Scan a host/IP. |
+| `kimscan posture` | Check this machine and show drift since the baseline. |
+| `kimscan posture --accept` | Save the current state as the baseline. |
+| `kimscan posture --show-baseline` | Print the saved baseline. |
+| `kimscan posture --strict` | Incomplete coverage counts as CONDITIONAL. |
+| `kimscan report [<id>] [--out PATH]` | Markdown report for a session. |
 | `kimscan list` | List all sessions. |
 | `kimscan show <id>` | Show one full session. |
 | `kimscan status <id> <fp> new / accepted / fixed` | Mark an action. |

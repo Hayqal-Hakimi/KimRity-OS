@@ -512,6 +512,8 @@ install_gate_tools() {
   # KimScanning engine: kimscan CLI reads rules/en.yaml (English, no AI).
   install -Dm755 "$SCRIPT_DIR/kimscanning/kimscan" "$MOUNTPOINT/usr/local/bin/kimscan"
   install -Dm644 "$SCRIPT_DIR/kimscanning/rules/en.yaml" "$MOUNTPOINT/usr/local/share/kimscanning/rules/en.yaml"
+  install -Dm644 "$SCRIPT_DIR/kimscanning/USAGE.md" "$MOUNTPOINT/usr/share/doc/kimrity/kimscanning-usage.md"
+  install -Dm644 "$SCRIPT_DIR/kimscanning/README.md" "$MOUNTPOINT/usr/share/doc/kimrity/kimscanning.md"
 
   # semgrep: not packaged by Arch — venv keeps it away from system python.
   # Proven working on Python 3.14 during the A4 test (8 Nov).
@@ -575,7 +577,9 @@ install_kim_services() {
     "$MOUNTPOINT/etc/systemd/user/default.target.wants/kimlogpipe.service"
 
   # auditd watches /etc so etc_watch produces etc_change events for KimLogPipe.
-  install -Dm640 "$SCRIPT_DIR/systemd/system/kimrity-audit.rules" \
+  # 0644, not 0640: `kimscan posture` counts the watches as your user and the
+  # rule list is not a secret. auditd itself only reads them at load time.
+  install -Dm644 "$SCRIPT_DIR/systemd/system/kimrity-audit.rules" \
     "$MOUNTPOINT/etc/audit/rules.d/kimrity.rules"
 
   info "KimAI, KimLogPipe, rules and audit watches installed"

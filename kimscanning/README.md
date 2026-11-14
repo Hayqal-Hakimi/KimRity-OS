@@ -1,4 +1,4 @@
-# KimScanning v1
+# KimScanning 2.0
 
 KimScanning is a command-line tool in the style of `nmap` that wraps
 [`gate/gate.py`](../gate/gate.py). Every scan is stored as a **session
@@ -9,6 +9,14 @@ scans. No AI, no network calls made by KimScanning itself.
 KimScanning does not produce its own verdict: the verdict comes from the
 KimRity Security Gate. If a scanner tool is missing or fails, the gate does
 not approve and KimScanning records that honestly.
+
+Version 2 adds `posture`: the same idea applied to the host it runs on.
+Twelve checks read what an unprivileged user can read (auditd state, audit
+watches, the KimAI/KimLogPipe units and socket, wildcard listeners, sshd,
+accounts, sudoers, PATH, sysctl, temp directories, disk encryption), each
+finding carries its own WHAT/WHY/FIX text, and a saved baseline turns the
+output into drift. Checks that need root are reported as **not evaluated**,
+never as clean; `--strict` turns that gap into CONDITIONAL.
 
 ## Requirements
 
@@ -186,6 +194,28 @@ If a rule is not in the dictionary:
 
 `kimscan rules` without a flag lists every dictionary entry.
 
+## Posture
+
+```bash
+kimscan posture                  # check this host, show drift vs baseline
+kimscan posture --accept         # save the current state as the reference
+kimscan posture --show-baseline  # inspect the saved reference
+kimscan posture --strict         # unevaluated checks make it CONDITIONAL
+kimscan report [<id>] [--out P]  # markdown for any session
+```
+
+The baseline lives at `$XDG_DATA_HOME/kimscanning/posture/baseline.json` and
+stores one entry per problem key (for example `listen:0.0.0.0:22`). Drift has
+three shapes: `new` (a key that was not in the baseline), `gone` (a baseline
+key that no longer appears) and `changed` (same key, different severity).
+`--accept` prints every key it accepts, so nothing becomes normal silently.
+
+Exit codes follow the artifact scans: `0` PASS, `2` CONDITIONAL, `3` FAIL.
+
+Testing hook: `KIMSCAN_POSTURE_ROOT` moves every file read under a fixture
+directory and `KIMSCAN_POSTURE_SS` replaces the `ss -ltnH` output, which is
+how `test/run_tests.sh` tests posture without touching the real system.
+
 ## Tests
 
 Tests use temp `HOME` and `XDG_DATA_HOME` so real configuration is not
@@ -200,15 +230,22 @@ random AWS-style keys with `tr -dc 'A-Z2-7'`, and then check verdicts, exit
 codes, sessions, explanations, status carry-over, rejection of `web` without
 authorization, `rules --missing`, and `doctor`.
 
+The posture tests run from a fixture root (`KIMSCAN_POSTURE_ROOT`), so they
+work even where no scanner tools exist: a clean fixture must be PASS, a bad
+fixture (second UID 0, empty password, `PermitRootLogin yes`, non-sticky
+`/tmp`, `NOPASSWD`, weak sysctl) must be FAIL with those exact keys, and
+`--accept` + a changed listener must produce `1 new, 0 changed, 1 gone`.
+
 To run the tests with tools from a temp directory:
 
 ```bash
 PATH=/tmp/opencode/bin:$PATH bash kimscanning/test/run_tests.sh
 ```
 
-## v1 limits
+## Limits
 
-- No full-screen UI yet; this is a command-line tool.
+- No full-screen UI yet; this is a command-line tool. The desktop binding
+  (`SUPER + SHIFT + K`) runs `kitty --hold -e kimscan posture`.
 - Real `web`/`server` scans require an authorized target and the tools
   `nuclei`/`nikto`/`nmap`/`ssh-audit`. If a tool is missing, the gate gives
   FAIL for lack of evidence.
