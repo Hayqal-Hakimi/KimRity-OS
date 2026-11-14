@@ -45,6 +45,9 @@ copy gate                            "$PROFILE/root/gate"
 copy tools                           "$PROFILE/root/tools"
 copy hardening                       "$PROFILE/root/hardening"
 copy kimscanning                     "$PROFILE/root/kimscanning"
+copy kimai                           "$PROFILE/root/kimai"
+copy kimlogpipe                      "$PROFILE/root/kimlogpipe"
+copy systemd                         "$PROFILE/root/systemd"
 
 # what the live environment itself runs
 copy kimscanning/kimscan             "$PROFILE/usr/local/bin/kimscan"

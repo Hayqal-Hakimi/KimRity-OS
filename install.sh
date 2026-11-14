@@ -43,7 +43,7 @@ AI_PKGS=0
 
 BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh)
 DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
-              kitty waybar wofi mako cliphist yazi playerctl
+              kitty waybar wofi mako libnotify cliphist yazi playerctl
               xdg-desktop-portal-hyprland xdg-desktop-portal
               polkit pipewire pipewire-pulse wireplumber mesa
               swaybg ttf-jetbrains-mono-nerd)
@@ -193,7 +193,7 @@ EOF
 
 # -------------------------------------------------------------------- steps
 partition_disk() {
-  step "1/11 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
+  step "1/12 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
   run wipefs -a "$DISK"
   run sgdisk --zap-all "$DISK"
   run sgdisk -n "1:0:+1G" -t "1:ef00" -c "1:$ESP_LABEL" "$DISK"
@@ -214,7 +214,7 @@ partition_disk() {
 format_and_mount() {
   local root="${DISK}"; root="$(part 2)"; local esp; esp="$(part 1)"
 
-  step "2/11 Format: vfat (ESP) + btrfs ($ROOT_LABEL)"
+  step "2/12 Format: vfat (ESP) + btrfs ($ROOT_LABEL)"
   run mkfs.fat -F 32 -n "$ESP_LABEL" "$esp"
   run mkfs.btrfs -f -L "$ROOT_LABEL" "$root"
 
@@ -224,7 +224,7 @@ format_and_mount() {
   # system (the B0b lesson: mv across subvolumes fails with EXDEV).
   # It is mounted only later — snapper's create-config needs /.snapshots to
   # not exist yet as a mountpoint (ArchWiki: Snapper # Btrfs layout).
-  step "3/11 Subvolumes + mounts ($MOUNT_OPTS)"
+  step "3/12 Subvolumes + mounts ($MOUNT_OPTS)"
   run mount "$root" "$MOUNTPOINT"
   run btrfs subvolume create "$MOUNTPOINT/$ROOT_SUBVOL"
   run btrfs subvolume create "$MOUNTPOINT/$HOME_SUBVOL"
@@ -237,7 +237,7 @@ format_and_mount() {
 }
 
 pacstrap_base() {
-  step "4/11 pacstrap base packages (${#BASE_PKGS[@]} packages)"
+  step "4/12 pacstrap base packages (${#BASE_PKGS[@]} packages)"
 
   # No -K here. `pacstrap -K` initialises an EMPTY keyring in the target and
   # implies -G (never copy the host keyring), so package signature checks fail
@@ -246,7 +246,7 @@ pacstrap_base() {
   # pacstrap copies that populated keyring into the new root.
   run pacstrap "$MOUNTPOINT" "${BASE_PKGS[@]}"
 
-  step "5/11 genfstab"
+  step "5/12 genfstab"
   if [ "$DRY" = 1 ]; then
     printf '[dry] genfstab -U %s >> %s/etc/fstab\n' "$MOUNTPOINT" "$MOUNTPOINT"
   else
@@ -258,7 +258,7 @@ pacstrap_base() {
 chroot_configure() {
   local cfile="$MOUNTPOINT/root/chroot-setup.sh"
 
-  step "6/11 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
+  step "6/12 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] write %s and run: arch-chroot %s bash /root/chroot-setup.sh\n' "$cfile" "$MOUNTPOINT"
@@ -289,6 +289,22 @@ mkdir -p /var/log/journal
 id -u "$USERNAME" >/dev/null 2>&1 || \
   useradd -m -u $USER_UID -G wheel -s /bin/bash "$USERNAME"
 
+# KimLogPipe runs as a user service and needs to read journald and the audit
+# log. systemd-journal already exists on Arch; auditd is told to use that group
+# below so /var/log/audit/audit.log becomes group-readable.
+getent group systemd-journal >/dev/null 2>&1 || groupadd -r systemd-journal
+usermod -aG systemd-journal "$USERNAME"
+
+# KimAI + KimLogPipe must be alive without an open terminal (the "anti-cheat"
+# model from 26 Oct). enable-linger only writes this marker file.
+mkdir -p /var/lib/systemd/linger
+touch "/var/lib/systemd/linger/$USERNAME"
+
+# The user service reads the audit trail; keep the default root:root 0600 off.
+if [ -f /etc/audit/auditd.conf ]; then
+  sed -i 's/^log_group =.*/log_group = systemd-journal/' /etc/audit/auditd.conf
+fi
+
 printf '%%wheel ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/10-wheel
 chmod 440 /etc/sudoers.d/10-wheel
 visudo -c
@@ -304,7 +320,7 @@ bootloader_limine() {
   local root esp uuid
   root="$(part 2)"; esp="$(part 1)"
 
-  step "7/11 Limine (fallback path + limine.conf)"
+  step "7/12 Limine (fallback path + limine.conf)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] cp BOOTX64.EFI -> %s/boot/EFI/BOOT/ ; write limine.conf (UUID from blkid)\n' "$MOUNTPOINT"
@@ -338,7 +354,7 @@ CONF
 }
 
 install_dotfiles() {
-  step "8/11 Dotfiles -> /home/$USERNAME"
+  step "8/12 Dotfiles -> /home/$USERNAME"
   if [ ! -d "$DOTFILES_DIR" ]; then
     warn "dotfiles missing — skipped"; return 0
   fi
@@ -375,7 +391,7 @@ install_dotfiles() {
 }
 
 install_packages() {
-  step "9/11 Desktop (${#DESKTOP_PKGS[@]}) + daily apps (${#APP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
+  step "9/12 Desktop (${#DESKTOP_PKGS[@]}) + daily apps (${#APP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
   run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm \
     "${DESKTOP_PKGS[@]}" "${APP_PKGS[@]}" "${TOOL_PKGS[@]}"
   # Daily-app defaults (B1): PDF -> zathura, video -> mpv, web -> firefox.
@@ -413,7 +429,7 @@ install_packages() {
 #     empty stubs inside a snapshot — normal, nothing to do.
 # -----------------------------------------------------------------------------
 install_snapper_stack() {
-  step "10/11 Snapshot stack: snapper configs (root, home) + limits + timers"
+  step "10/12 Snapshot stack: snapper configs (root, home) + limits + timers"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] chroot: snapper create-config / (root) + /home (home)\n'
@@ -481,7 +497,7 @@ install_gate_tools() {
   # gate + kimscan + their engines (repo scans are the daily use case).
   # Engines: gitleaks/trivy/nikto/ssh-audit come from TOOL_PKGS (pacman).
   # semgrep is not in the Arch repos -> venv; nuclei -> pinned binary.
-  step "11/11 Security Gate + kimscan (always): engines + semgrep venv + nuclei"
+  step "11/12 Security Gate + kimscan (always): engines + semgrep venv + nuclei"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] gate.py + kimscan + en.yaml -> /usr/local/bin + /usr/local/share/kimscanning\n'
@@ -520,6 +536,49 @@ install_gate_tools() {
   else
     warn "nuclei download failed — install it later (web scans will flag the missing tool)"
   fi
+}
+
+install_kim_services() {
+  # KimAI + KimLogPipe: the two tools that were still dormant after build 11.
+  # Both ship in the default profile: the OS is meant to explain itself, and
+  # neither tool costs anything while idle.
+  step "12/12 KimAI broker + KimLogPipe live pipeline (systemd user units)"
+
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] kimai + kimlogpipe -> /usr/local/bin (mode 755)\n'
+    printf '[dry] rules.yaml -> /usr/local/share/kimlogpipe/rules.yaml\n'
+    printf '[dry] systemd user units -> /usr/lib/systemd/user + enable symlinks\n'
+    printf '[dry] audit rules -> /etc/audit/rules.d/kimrity.rules (key etc_watch)\n'
+    return 0
+  fi
+
+  install -Dm755 "$SCRIPT_DIR/kimai/kimai" "$MOUNTPOINT/usr/local/bin/kimai"
+  install -Dm644 "$SCRIPT_DIR/kimai/README.md" "$MOUNTPOINT/usr/local/share/kimai/README.md"
+  install -Dm644 "$SCRIPT_DIR/kimai/config.example.toml" \
+    "$MOUNTPOINT/usr/local/share/kimai/config.example.toml"
+
+  install -Dm755 "$SCRIPT_DIR/kimlogpipe/kimlogpipe" "$MOUNTPOINT/usr/local/bin/kimlogpipe"
+  install -Dm644 "$SCRIPT_DIR/kimlogpipe/rules.yaml" \
+    "$MOUNTPOINT/usr/local/share/kimlogpipe/rules.yaml"
+  install -Dm644 "$SCRIPT_DIR/kimlogpipe/README.md" "$MOUNTPOINT/usr/local/share/kimlogpipe/README.md"
+
+  # systemd --user cannot be driven from inside arch-chroot, so the units are
+  # installed system-wide for user sessions and enabled with a plain symlink.
+  install -Dm644 "$SCRIPT_DIR/systemd/user/kimai.service" \
+    "$MOUNTPOINT/usr/lib/systemd/user/kimai.service"
+  install -Dm644 "$SCRIPT_DIR/systemd/user/kimlogpipe.service" \
+    "$MOUNTPOINT/usr/lib/systemd/user/kimlogpipe.service"
+  install -d -m 755 "$MOUNTPOINT/etc/systemd/user/default.target.wants"
+  ln -sf /usr/lib/systemd/user/kimai.service \
+    "$MOUNTPOINT/etc/systemd/user/default.target.wants/kimai.service"
+  ln -sf /usr/lib/systemd/user/kimlogpipe.service \
+    "$MOUNTPOINT/etc/systemd/user/default.target.wants/kimlogpipe.service"
+
+  # auditd watches /etc so etc_watch produces etc_change events for KimLogPipe.
+  install -Dm640 "$SCRIPT_DIR/systemd/system/kimrity-audit.rules" \
+    "$MOUNTPOINT/etc/audit/rules.d/kimrity.rules"
+
+  info "KimAI, KimLogPipe, rules and audit watches installed"
 }
 
 install_lab() {
@@ -631,6 +690,7 @@ main() {
   install_packages
   install_snapper_stack
   install_gate_tools
+  install_kim_services
   install_lab
   install_flatpak_tools
   finish

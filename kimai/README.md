@@ -1,200 +1,244 @@
-# KimAI v1 (rangka kerangka)
+# KimAI v0.2 - local approval broker and event sink
 
-KimAI v1 ialah servis latar belakang (broker) setempat yang menyimpan baris gilir
-kelulusan untuk alat lain seperti **KimScanning** dan **KimLogPipe**. Ia berjalan
-di latar hadapan apabila dimulakan dan hanya bertindak apabila diminta
-(*on-demand*). Tiada pemantauan latar, tiada pengundian log, tiada pemasa, dan
-tiada panggilan rangkaian dalam v1.
+KimAI is a background service (a broker) that lives inside the user session.
+Other tools - **KimScanning** and **KimLogPipe** - talk to it over a Unix
+socket. It never acts on its own: no polling, no timers, no network calls.
 
-## Keperluan
+Two jobs:
 
-- Python 3 (hanya pustaka standard)
-- Linux dengan soket Unix dan `SO_PEERCRED`
+| Job | Who uses it | What KimAI does |
+| --- | --- | --- |
+| Approval queue | KimScanning (actions that need a human) | Holds the request until the operator decides. **The decision always belongs to KimAI**, never to the calling tool. |
+| Event sink | KimLogPipe (live findings) | Records the finding append-only and raises a desktop notification for high severity. |
 
-## Permulaan pantas
+## Requirements
+
+- Python 3 (standard library only)
+- Linux with Unix sockets and `SO_PEERCRED`
+- Optional: `notify-send` (libnotify) for desktop notifications
+
+## Quick start
 
 ```bash
 chmod +x kimai/kimai
 
-# Terminal 1: jalankan daemon di latar hadapan
+# Terminal 1: run the daemon in the foreground
 ./kimai/kimai start
 
-# Terminal 2: semak status
+# Terminal 2
 ./kimai/kimai status
+./kimai/kimai approve list
 ```
 
-Untuk ujian berasingan daripada sesi pengguna sebenar:
+In a real session the daemon is started by systemd, not by hand. See
+"Running as a systemd user service" below.
 
-```bash
-HOME=<direktori-sementara> \
-XDG_DATA_HOME=<direktori-sementara>/.local/share \
-XDG_RUNTIME_DIR=<direktori-sementara>/run \
-bash kimai/test/run_tests.sh
-```
+## Design rules
 
-## Laluan socket
+1. **The broker is local only.** No HTTP client, no remote API, no model call
+   unless you explicitly configure a `command` for `ask`.
+2. **Alive does not mean calling a model.** A running KimAI costs nothing while
+   it is idle. Cost only appears when a tool calls `ask` and a command is
+   configured.
+3. **Tools degrade, they do not fail.** If KimAI is down, callers must fall
+   back to tools-only mode. KimLogPipe keeps working; KimScanning keeps
+   scanning.
+4. **Append-only audit.** Approvals and events are appended to JSONL files and
+   never rewritten.
+5. **Decisions are recorded, not implied.** Every approval row carries the
+   decision (`approve`/`reject`), the note and the original arguments.
 
-KimAI memilih laluan socket mengikut urutan berikut:
+## Socket path
 
-1. `$XDG_RUNTIME_DIR/kimai.sock` jika direktori itu wujud dan boleh ditulis.
-2. `/run/user/$(id -u)/kimai.sock` jika direktori itu wujud dan boleh ditulis.
-3. `~/.cache/kimai/kimai.sock` sebagai sandaran terakhir.
+KimAI picks the first usable location:
 
-Fail socket ditetapkan kepada mod **0600**. Daemon menyemak UID rakan sebaya
-melalui `SO_PEERCRED` dan menolak sambungan daripada UID yang berbeza, walaupun
-kebenaran sistem fail sudah menghalangnya.
+1. `$XDG_RUNTIME_DIR/kimai.sock`
+2. `/run/user/<uid>/kimai.sock`
+3. `~/.cache/kimai/kimai.sock`
 
-## Protokol
+The socket is created with mode `0600` inside a `0700` directory. Every
+connection is checked with `SO_PEERCRED`: a client with a different UID is
+refused.
 
-Protokol ialah **JSON bersempadan baris baharu** melalui soket Unix. Setiap
-sambungan boleh menghantar satu atau lebih permintaan; setiap baris ialah satu
-objek JSON.
+## Protocol
 
-Permintaan:
+Line-delimited JSON over the Unix socket. Each connection may send one or more
+requests; each line is one JSON object.
+
+Request:
 
 ```json
-{"id":"<sebarang>","op":"<nama>","args":{...}}
+{"id":"<any>","op":"<name>","args":{...}}
 ```
 
-Respons berjaya:
+Success:
 
 ```json
-{"id":"<sama>","ok":true,"result":{...}}
+{"id":"<same>","ok":true,"result":{...}}
 ```
 
-Respons gagal:
+Failure:
 
 ```json
-{"id":"<sama>","ok":false,"error":"<mesej>"}
+{"id":"<same>","ok":false,"error":"<message>"}
 ```
 
-`id` dipantulkan semula tanpa perubahan. `args` boleh ditinggalkan atau `{}`
-jika op tidak memerlukannya. Baris kosong diabaikan.
+`id` is echoed back unchanged. `args` may be omitted or `{}` when the op does
+not need it. Blank lines are ignored.
 
-## Operasi v1
+## Operations
 
-| Op | Args | Keputusan |
+| Op | Args | Result |
 | --- | --- | --- |
-| `ping` | – | `{"pong":true,"version":"0.1.0"}` |
-| `status` | – | `{"version","uptime_s","ai_enabled","pending_approvals","socket"}` |
-| `ask` | `{"prompt":"..."}` | `{"answer":"..."}` jika `command` dikonfigurasi; jika tidak, ralat `AI belum dikonfigurasi` |
-| `approve.request` | `{"tool","action","args","risk","reason"}` | `{"request_id":"<id>"}` |
-| `approve.list` | – | `{"pending":[...],"recent":[...]}` |
-| `approve.decide` | `{"request_id","decision":"lulus\|tolak","note":""}` | `{"request_id","decision","note"}` |
-| `shutdown` | – | `{"shutdown":true}` (digunakan oleh `kimai stop`) |
+| `ping` | - | `{"pong":true,"version":"0.2.0"}` |
+| `status` | - | `{"version","uptime_s","ai_enabled","pending_approvals","events_received","notify","socket"}` |
+| `ask` | `{"prompt":"..."}` | `{"answer":"..."}` when a `command` is configured; otherwise the error `AI is not configured` |
+| `event` | `{"source","kind","severity","summary","data"}` | `{"event_id":"ev-...","notified":true\|false}` |
+| `event.list` | `{"limit":N}` | `{"events":[...]}` (oldest first, last N) |
+| `approve.request` | `{"tool","action","args","risk","reason"}` | `{"request_id":"req-..."}` |
+| `approve.list` | - | `{"pending":[...],"recent":[...]}` |
+| `approve.decide` | `{"request_id","decision":"approve\|reject","note":""}` | `{"request_id","decision","note"}` |
+| `shutdown` | - | `{"shutdown":true}` (used by `kimai stop`) |
 
-Op yang tidak dikenali mengembalikan `ok:false` dengan mesej yang jelas.
+An unknown op returns `ok:false` with the message `Unknown op: <name>`.
+
+### `event`
+
+`severity` must be one of `low`, `medium`, `high`, `critical`. `data` must be a
+JSON object (default `{}`). Each event is appended to
+`$XDG_DATA_HOME/kimai/events.jsonl`:
+
+```json
+{"ts":"2026-11-14T05:49:14.475Z","event_id":"ev-ffd1...","source":"kimlogpipe",
+ "kind":"ssh_bruteforce","severity":"high",
+ "summary":"6 failed SSH authentications from 10.0.2.2 in 300s",
+ "data":{"src_ip":"10.0.2.2","count":6}}
+```
+
+`events.jsonl` is rotated to `events.jsonl.1` once it passes 5 MB, so the file
+cannot grow without bound.
 
 ### `ask`
 
-Secara lalai tiada AI dikonfigurasi, jadi `ask` memulangkan:
+The configured `command` runs with the prompt on stdin. Its stdout becomes the
+answer. There is a 120 second timeout and a 1 MB line limit.
+
+## Notifications
+
+`event` raises a desktop notification (`notify-send`) when severity is `high`
+or `critical`. It is fire-and-forget: a missing notifier never blocks or
+breaks the broker.
+
+Disable it with an environment variable on the service:
+
+```ini
+Environment=KIMAI_NOTIFY=0
+```
+
+`status.notify` reports the current setting.
+
+## Append-only records
+
+| File | Written by | Contents |
+| --- | --- | --- |
+| `$XDG_DATA_HOME/kimai/approvals.jsonl` | `approve.request`, `approve.decide` | one row per request, one row per decision |
+| `$XDG_DATA_HOME/kimai/events.jsonl` | `event` | one row per finding |
+
+Request row:
 
 ```json
-{"id":"...","ok":false,"error":"AI belum dikonfigurasi"}
+{"ts":"...","request_id":"req-...","tool":"KimScanning","action":"scan-directory",
+ "args":{"target":"/tmp"},"risk":"medium","reason":"integration test",
+ "decision":null,"note":""}
 ```
 
-Jika `~/.config/kimai/config.toml` mempunyai kunci `command` (di peringkat atas
-atau dalam jadual `[ai]`), KimAI menjalankan perintah **tempatan** itu, menghantar
-prompt melalui `stdin`, dan memulangkan `stdout` sebagai `answer`. Tiada klien
-web atau API rangkaian digunakan oleh KimAI. Lihat `kimai/config.example.toml`.
-
-### Kelulusan
-
-`approve.request` menyimpan permintaan dalam ingatan dan menambah satu baris ke
-fail rekod. `approve.decide` merekodkan keputusan dan menambah satu lagi baris.
-Permintaan yang belum diputuskan muncul dalam `pending`; keputusan terkini muncul
-dalam `recent`.
-
-## Rekod tambah-sahaja
-
-Setiap permintaan dan keputusan ditambah ke:
-
-```
-$XDG_DATA_HOME/kimai/approvals.jsonl
-```
-
-Jika `XDG_DATA_HOME` tidak ditetapkan, laluannya ialah
-`~/.local/share/kimai/approvals.jsonl`. Fail ini **hanya ditambah** dan tidak
-pernah ditulis semula atau dikosongkan. Setiap baris ialah satu objek JSON:
+Decision row (same `request_id`, `decision` filled in):
 
 ```json
-{"ts":"...","request_id":"...","tool":"...","action":"...","args":{},"risk":"...","reason":"...","decision":null,"note":""}
+{"ts":"...","request_id":"req-...","tool":"KimScanning","action":"scan-directory",
+ "args":{"target":"/tmp"},"risk":"medium","reason":"integration test",
+ "decision":"approve","note":"checked by hand"}
 ```
 
-Baris permintaan mempunyai `decision:null`; baris keputusan mempunyai
-`decision:"lulus"` atau `"tolak"` serta `note`.
+## How KimScanning asks for approval
 
-## Cara KimScanning meminta kelulusan
+KimScanning has no approval UI of its own. It sends a request and waits for the
+decision to appear:
 
-KimScanning boleh membuka sambungan baharu, menghantar satu permintaan, membaca
-satu respons, dan menutup sambungan:
-
-```python
-import json
-import os
-import socket
-
-sock_path = os.path.join(os.environ["XDG_RUNTIME_DIR"], "kimai.sock")
-request = {
-    "id": "imbas-001",
-    "op": "approve.request",
-    "args": {
-        "tool": "KimScanning",
-        "action": "imbas-direktori",
-        "args": {"sasaran": "/home/pengguna/MuatTurun"},
-        "risk": "sederhana",
-        "reason": "Mengesan fail mencurigakan sebelum tindakan selanjutnya",
-    },
-}
-
-client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-client.settimeout(5)
-client.connect(sock_path)
-client.sendall((json.dumps(request) + "\n").encode("utf-8"))
-response = json.loads(client.makefile("rb").readline())
-client.close()
-
-print(response)
-# {"id":"imbas-001","ok":true,"result":{"request_id":"req-..."}}
+```json
+{"id":"1","op":"approve.request","args":{
+  "tool":"KimScanning",
+  "action":"delete-quarantine",
+  "args":{"path":"/home/user/.cache/kimscan/q/abc"},
+  "risk":"high",
+  "reason":"remove quarantined file after review"}}
 ```
 
-KimScanning kemudian menyimpan `request_id` itu dan boleh menyemak
-`approve.list` atau menunggu pengguna memutuskan melalui:
+Then it polls `approve.list`, or reads the ledger, until the row for its
+`request_id` has a non-null `decision`. If KimAI is not running, KimScanning
+must continue in tools-only mode.
 
-```bash
-./kimai/kimai approve list
-./kimai/kimai approve yes req-... --note "disemak secara manual"
-./kimai/kimai approve no  req-... --note "sasaran tidak dibenarkan"
-```
-
-## Arahan klien
+## CLI
 
 ```bash
 kimai start
 kimai stop
 kimai status
 kimai ask "<prompt>"
+kimai events [--limit N]
 kimai approve list
 kimai approve yes <request_id> [--note "..."]
 kimai approve no  <request_id> [--note "..."]
 ```
 
-Jika daemon tidak berjalan, semua arahan klien mencetak `KimAI tidak berjalan`
-dan keluar dengan kod bukan sifar. Klien tidak akan menunggu atau memulakan
-daemon secara automatik.
+`kimai events` reads `events.jsonl` directly (no daemon needed), so it also
+works when the service is stopped.
 
-`kimai stop` menghantar op `shutdown`, kemudian membuang fail socket. Daemon
-juga membuang socket semasa keluar secara normal (SIGINT/SIGTERM).
+## Configuration
 
-## Konfigurasi
+Optional file: `~/.config/kimai/config.toml`.
 
-Salin `kimai/config.example.toml` ke `~/.config/kimai/config.toml` jika mahu
-mengaktifkan `ask` dengan perintah tempatan. Jangan masukkan klien rangkaian
-dalam konfigurasi jika mahu mematuhi sifat v1.
+```toml
+command = "/usr/local/bin/local-llm --stdin"
+```
 
-## Nota tentang pemantauan cron
+The `[ai]` table form is also accepted. Without this file, `ask` returns
+`AI is not configured` and everything else keeps working.
 
-Pemantauan berkala melalui cron **boleh** dilakukan pada masa hadapan (contohnya
-menjalankan KimScanning setiap jam dan meminta kelulusan melalui KimAI), tetapi
-ia **sengaja tidak diaktifkan secara lalai** dalam v1. KimAI v1 hanya bertindak
-apabila alat lain memanggilnya.
+## Running as a systemd user service
+
+Unit: `systemd/user/kimai.service` (installed to
+`/usr/lib/systemd/user/kimai.service`).
+
+```bash
+systemctl --user enable --now kimai.service
+systemctl --user status kimai.service
+loginctl enable-linger "$USER"   # alive without an open terminal
+```
+
+The unit restarts on failure and starts with the user session. It does not
+need root and does not open a network port.
+
+## Notes on monitoring
+
+KimAI does **not** watch anything by itself. A cron job or a timer that feeds it
+events is an opt-in decision by the operator, not default behaviour. KimLogPipe
+is the component that watches logs; KimAI only records what it is told.
+
+## Tests
+
+```bash
+./kimai/test/run_tests.sh
+```
+
+The test suite runs against a temporary `HOME`, `XDG_DATA_HOME` and
+`XDG_RUNTIME_DIR`; it never touches the real session. It covers the socket
+mode, `ping`, `status`, `ask` without configuration, the full approval
+lifecycle, the event sink, invalid input and shutdown behaviour.
+
+## Version history
+
+| Version | Change |
+| --- | --- |
+| 0.1.0 | Approval broker: `ping`, `status`, `ask`, `approve.*`, `shutdown`. Malay strings, `lulus`/`tolak` decisions. |
+| 0.2.0 | English throughout. `approve`/`reject` decisions. New `event` and `event.list` ops with desktop notifications. `events_received` in `status`. `kimai events` CLI. |

@@ -1,0 +1,18 @@
+[Unit]
+Description=KimAI local approval broker and event sink
+Documentation=file:/usr/local/share/kimai/README.md
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kimai start
+Restart=on-failure
+RestartSec=2
+# Desktop notifications are on by default; set 0 to keep the broker silent.
+Environment=KIMAI_NOTIFY=1
+# The broker only needs the user session, not the network.
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

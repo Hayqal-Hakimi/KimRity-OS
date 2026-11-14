@@ -1,0 +1,18 @@
+[Unit]
+Description=KimLogPipe live log pipeline (journald + auditd -> events -> KimAI)
+Documentation=file:/usr/local/share/kimlogpipe/README.md
+After=kimai.service
+Wants=kimai.service
+PartOf=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/kimlogpipe follow
+Restart=on-failure
+RestartSec=5
+# Keep going even if KimAI never starts: findings are still recorded.
+Environment=KIMLOGPIPE_KIMAI=1
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,18 @@
+## KimRity audit rules: watch identity and boot-critical files.
+## Installed to /etc/audit/rules.d/kimrity.rules.
+## Every watch uses key "etc_watch" so KimLogPipe maps it to action=etc_change.
+##
+## /etc/resolv.conf is deliberately absent: NetworkManager replaces it on every
+## DHCP renew, which produced one finding per boot for a temp file name. It is
+## not identity data and the noise hid the signal.
+
+-w /etc/passwd -p wa -k etc_watch
+-w /etc/shadow -p wa -k etc_watch
+-w /etc/group -p wa -k etc_watch
+-w /etc/gshadow -p wa -k etc_watch
+-w /etc/sudoers -p wa -k etc_watch
+-w /etc/sudoers.d/ -p wa -k etc_watch
+-w /etc/ssh/sshd_config -p wa -k etc_watch
+-w /etc/hosts -p wa -k etc_watch
+-w /etc/systemd/system/ -p wa -k etc_watch
+-w /etc/pacman.conf -p wa -k etc_watch

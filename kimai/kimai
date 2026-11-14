@@ -1,13 +1,25 @@
 #!/usr/bin/env python3
-"""KimAI v1 - broker kelulusan setempat melalui Unix socket.
+"""KimAI v0.2 - local approval broker and event sink over a Unix socket.
 
-Tiada model AI, tiada panggilan rangkaian dan tiada API luar dalam v1.
-Fail ini hanya menggunakan pustaka standard Python.
+No AI model, no network calls and no external API are used here. The broker
+only uses the Python standard library.
+
+Two responsibilities:
+
+1. Approval queue - other tools (KimScanning, KimLogPipe) ask permission
+   through the socket and the decision always belongs to KimAI.
+2. Event sink - KimLogPipe pushes findings as events; KimAI records them
+   append-only and raises a desktop notification for high severity.
+
+The broker is designed to run as a systemd user service so it is alive
+whenever the user session is alive. It does nothing while idle: no polling,
+no timers, no network.
 """
 
 import json
 import os
 import shlex
+import shutil
 import signal
 import socket
 import stat
@@ -24,23 +36,33 @@ try:
 except ImportError:  # Python < 3.11
     tomllib = None
 
-VERSION = "0.1.0"
-AI_NOT_CONFIGURED = "AI belum dikonfigurasi"
-NOT_RUNNING = "KimAI tidak berjalan"
+VERSION = "0.2.0"
+AI_NOT_CONFIGURED = "AI is not configured"
+NOT_RUNNING = "KimAI is not running"
 MAX_LINE = 1024 * 1024
 RECENT_LIMIT = 50
+EVENT_LIMIT = 200
+EVENT_ROTATE_BYTES = 5 * 1024 * 1024
+SEVERITIES = ("low", "medium", "high", "critical")
 
 
 class BrokerError(Exception):
-    """Ralat yang selamat dipaparkan kepada klien."""
+    """An error that is safe to show to the client."""
 
 
 def _home():
     return os.environ.get("HOME") or os.path.expanduser("~")
 
 
+def data_dir():
+    base = os.environ.get("XDG_DATA_HOME")
+    if not base:
+        base = os.path.join(_home(), ".local", "share")
+    return os.path.join(base, "kimai")
+
+
 def socket_path():
-    """Pilih laluan socket mengikut XDG_RUNTIME_DIR, /run/user/<uid>, cache."""
+    """Pick the socket path from XDG_RUNTIME_DIR, /run/user/<uid>, then cache."""
     uid = os.getuid()
     xdg = os.environ.get("XDG_RUNTIME_DIR")
     if xdg:
@@ -56,10 +78,11 @@ def socket_path():
 
 
 def approvals_path():
-    base = os.environ.get("XDG_DATA_HOME")
-    if not base:
-        base = os.path.join(_home(), ".local", "share")
-    return os.path.join(base, "kimai", "approvals.jsonl")
+    return os.path.join(data_dir(), "approvals.jsonl")
+
+
+def events_path():
+    return os.path.join(data_dir(), "events.jsonl")
 
 
 def config_path():
@@ -75,9 +98,8 @@ def now_iso():
 _record_lock = threading.Lock()
 
 
-def append_record(entry):
-    """Tambah satu objek JSON ke fail rekod. Hanya append, tidak pernah tulis semula."""
-    path = approvals_path()
+def _append_jsonl(path, entry):
+    """Append one JSON object to a file. Append only, never rewrite."""
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
     payload = line.encode("utf-8")
@@ -90,22 +112,106 @@ def append_record(entry):
             os.close(fd)
 
 
-def configured_command():
-    """Baca kunci 'command' daripada ~/.config/kimai/config.toml.
+def append_record(entry):
+    _append_jsonl(approvals_path(), entry)
 
-    Kunci boleh berada di peringkat atas atau dalam jadual [ai].
-    Pulangkan None jika tiada. Naikkan BrokerError jika fail tidak sah.
+
+def _count_lines(path):
+    if not os.path.isfile(path):
+        return 0
+    total = 0
+    try:
+        with open(path, "rb") as handle:
+            for line in handle:
+                if line.strip():
+                    total += 1
+    except OSError:
+        return 0
+    return total
+
+
+def _rotate_events():
+    """Keep events.jsonl bounded by rotating one generation."""
+    path = events_path()
+    try:
+        if os.path.isfile(path) and os.path.getsize(path) > EVENT_ROTATE_BYTES:
+            os.replace(path, path + ".1")
+    except OSError:
+        pass
+
+
+def read_events(limit=EVENT_LIMIT):
+    path = events_path()
+    if not os.path.isfile(path):
+        return []
+    out = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, dict):
+                    out.append(obj)
+    except OSError:
+        return []
+    if limit > 0:
+        return out[-limit:]
+    return out
+
+
+def notify_enabled():
+    return os.environ.get("KIMAI_NOTIFY", "1").strip() not in ("0", "false", "no")
+
+
+def send_notification(severity, title, body):
+    """Fire a desktop notification without blocking the broker loop."""
+    urgency = "critical" if severity == "critical" else "normal"
+
+    def _run():
+        try:
+            subprocess.run(
+                [
+                    "notify-send",
+                    "-a",
+                    "KimAI",
+                    "-u",
+                    urgency,
+                    "-c",
+                    "security",
+                    title,
+                    body,
+                ],
+                capture_output=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+
+
+def configured_command():
+    """Read the 'command' key from ~/.config/kimai/config.toml.
+
+    The key may sit at the top level or inside an [ai] table. Returns None
+    when absent and raises BrokerError when the file is malformed.
     """
     path = config_path()
     if not os.path.exists(path):
         return None
     if tomllib is None:
-        raise BrokerError("tomllib tidak tersedia; konfigurasi tidak dapat dibaca")
+        raise BrokerError("tomllib is unavailable; the config cannot be read")
     try:
         with open(path, "rb") as handle:
             data = tomllib.load(handle)
     except (OSError, ValueError) as exc:
-        raise BrokerError("Konfigurasi KimAI tidak sah: %s" % exc)
+        raise BrokerError("Invalid KimAI config: %s" % exc)
     command = data.get("command")
     if command is None and isinstance(data.get("ai"), dict):
         command = data["ai"].get("command")
@@ -119,7 +225,7 @@ def configured_command():
         isinstance(part, str) for part in command
     ):
         return command
-    raise BrokerError("Kunci 'command' mesti rentetan atau senarai rentetan")
+    raise BrokerError("The 'command' key must be a string or a list of strings")
 
 
 def ai_enabled():
@@ -135,6 +241,7 @@ class Broker:
         self.lock = threading.RLock()
         self.pending = {}
         self.recent = []
+        self.events_received = _count_lines(events_path())
 
     def ping(self):
         return {"pong": True, "version": VERSION}
@@ -142,18 +249,21 @@ class Broker:
     def status(self):
         with self.lock:
             pending = len(self.pending)
+            events = self.events_received
         return {
             "version": VERSION,
             "uptime_s": round(time.monotonic() - self.started, 3),
             "ai_enabled": ai_enabled(),
             "pending_approvals": pending,
+            "events_received": events,
+            "notify": notify_enabled(),
             "socket": socket_path(),
         }
 
     def ask(self, args):
         prompt = args.get("prompt")
         if not isinstance(prompt, str):
-            raise BrokerError("Medan 'prompt' diperlukan")
+            raise BrokerError("The 'prompt' field is required")
         command = configured_command()
         if command is None:
             raise BrokerError(AI_NOT_CONFIGURED)
@@ -162,7 +272,7 @@ class Broker:
         else:
             argv = list(command)
         if not argv:
-            raise BrokerError("Kunci 'command' kosong")
+            raise BrokerError("The 'command' key is empty")
         try:
             proc = subprocess.run(
                 argv,
@@ -172,19 +282,73 @@ class Broker:
                 timeout=120,
             )
         except FileNotFoundError:
-            raise BrokerError("Perintah AI tidak dijumpai: %s" % argv[0])
+            raise BrokerError("AI command not found: %s" % argv[0])
         except subprocess.TimeoutExpired:
-            raise BrokerError("Perintah AI tamat masa selepas 120 saat")
+            raise BrokerError("AI command timed out after 120 seconds")
         except OSError as exc:
-            raise BrokerError("Perintah AI gagal dijalankan: %s" % exc)
+            raise BrokerError("AI command failed to start: %s" % exc)
         if proc.returncode != 0:
             detail = (proc.stderr or "").strip()
             if detail:
                 raise BrokerError(
-                    "Perintah AI gagal (kod %d): %s" % (proc.returncode, detail)
+                    "AI command failed (exit %d): %s" % (proc.returncode, detail)
                 )
-            raise BrokerError("Perintah AI gagal (kod %d)" % proc.returncode)
+            raise BrokerError("AI command failed (exit %d)" % proc.returncode)
         return {"answer": proc.stdout, "ai_enabled": True}
+
+    def event(self, args):
+        source = args.get("source")
+        kind = args.get("kind")
+        severity = args.get("severity", "medium")
+        summary = args.get("summary")
+        payload = args.get("data", {})
+        if not isinstance(source, str) or not source.strip():
+            raise BrokerError("The 'source' field is required")
+        if not isinstance(kind, str) or not kind.strip():
+            raise BrokerError("The 'kind' field is required")
+        if not isinstance(summary, str) or not summary.strip():
+            raise BrokerError("The 'summary' field is required")
+        if severity not in SEVERITIES:
+            raise BrokerError(
+                "The 'severity' field must be one of: %s" % ", ".join(SEVERITIES)
+            )
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise BrokerError("The 'data' field must be a JSON object")
+
+        event_id = "ev-" + uuid.uuid4().hex
+        entry = {
+            "ts": now_iso(),
+            "event_id": event_id,
+            "source": source,
+            "kind": kind,
+            "severity": severity,
+            "summary": summary,
+            "data": payload,
+        }
+        notified = False
+        if severity in ("high", "critical") and notify_enabled():
+            if shutil.which("notify-send"):
+                send_notification(severity, "%s: %s" % (source, kind), summary)
+                notified = True
+            else:
+                print(
+                    "notify-send is not installed; event recorded without a notification",
+                    file=sys.stderr,
+                )
+        entry["notified"] = notified
+        _rotate_events()
+        _append_jsonl(events_path(), entry)
+        with self.lock:
+            self.events_received += 1
+        return {"event_id": event_id, "notified": notified}
+
+    def event_list(self, args):
+        limit = args.get("limit", 20)
+        if not isinstance(limit, int) or limit < 0:
+            raise BrokerError("The 'limit' field must be a non-negative integer")
+        return {"events": read_events(limit)}
 
     def approve_request(self, args):
         tool = args.get("tool")
@@ -193,19 +357,19 @@ class Broker:
         risk = args.get("risk", "")
         reason = args.get("reason", "")
         if not isinstance(tool, str) or not tool.strip():
-            raise BrokerError("Medan 'tool' diperlukan")
+            raise BrokerError("The 'tool' field is required")
         if not isinstance(action, str) or not action.strip():
-            raise BrokerError("Medan 'action' diperlukan")
+            raise BrokerError("The 'action' field is required")
         if not isinstance(request_args, dict):
-            raise BrokerError("Medan 'args' mesti objek JSON")
+            raise BrokerError("The 'args' field must be a JSON object")
         if risk is None:
             risk = ""
         if not isinstance(risk, str):
-            raise BrokerError("Medan 'risk' mesti rentetan")
+            raise BrokerError("The 'risk' field must be a string")
         if reason is None:
             reason = ""
         if not isinstance(reason, str):
-            raise BrokerError("Medan 'reason' mesti rentetan")
+            raise BrokerError("The 'reason' field must be a string")
 
         request_id = "req-" + uuid.uuid4().hex
         entry = {
@@ -236,22 +400,20 @@ class Broker:
         decision = args.get("decision")
         note = args.get("note", "")
         if not isinstance(request_id, str) or not request_id:
-            raise BrokerError("Medan 'request_id' diperlukan")
-        if decision not in ("lulus", "tolak"):
-            raise BrokerError("Keputusan mesti 'lulus' atau 'tolak'")
+            raise BrokerError("The 'request_id' field is required")
+        if decision not in ("approve", "reject"):
+            raise BrokerError("The decision must be 'approve' or 'reject'")
         if note is None:
             note = ""
         if not isinstance(note, str):
-            raise BrokerError("Medan 'note' mesti rentetan")
+            raise BrokerError("The 'note' field must be a string")
 
         with self.lock:
             entry = self.pending.get(request_id)
             if entry is None:
                 if any(item.get("request_id") == request_id for item in self.recent):
-                    raise BrokerError(
-                        "Permintaan %s sudah diputuskan" % request_id
-                    )
-                raise BrokerError("Permintaan %s tidak dijumpai" % request_id)
+                    raise BrokerError("Request %s was already decided" % request_id)
+                raise BrokerError("Request %s was not found" % request_id)
             record = {
                 "ts": now_iso(),
                 "request_id": request_id,
@@ -281,16 +443,16 @@ def _error(request_id, message):
 
 def dispatch(broker, request):
     if not isinstance(request, dict):
-        return _error(None, "Permintaan mesti objek JSON")
+        return _error(None, "The request must be a JSON object")
     request_id = request.get("id")
     op = request.get("op")
     args = request.get("args", {})
     if args is None:
         args = {}
     if not isinstance(op, str) or not op:
-        return _error(request_id, "Medan 'op' diperlukan")
+        return _error(request_id, "The 'op' field is required")
     if not isinstance(args, dict):
-        return _error(request_id, "Medan 'args' mesti objek JSON")
+        return _error(request_id, "The 'args' field must be a JSON object")
     try:
         if op == "ping":
             return _ok(request_id, broker.ping())
@@ -298,17 +460,21 @@ def dispatch(broker, request):
             return _ok(request_id, broker.status())
         if op == "ask":
             return _ok(request_id, broker.ask(args))
+        if op == "event":
+            return _ok(request_id, broker.event(args))
+        if op == "event.list":
+            return _ok(request_id, broker.event_list(args))
         if op == "approve.request":
             return _ok(request_id, broker.approve_request(args))
         if op == "approve.list":
             return _ok(request_id, broker.approve_list())
         if op == "approve.decide":
             return _ok(request_id, broker.approve_decide(args))
-        return _error(request_id, "Op tidak dikenali: %s" % op)
+        return _error(request_id, "Unknown op: %s" % op)
     except BrokerError as exc:
         return _error(request_id, str(exc))
-    except Exception as exc:  # jangan biarkan daemon mati kerana satu permintaan
-        return _error(request_id, "Ralat dalaman: %s" % exc)
+    except Exception as exc:  # never let one request kill the daemon
+        return _error(request_id, "Internal error: %s" % exc)
 
 
 def _peer_uid(conn):
@@ -324,9 +490,7 @@ def _peer_uid(conn):
 
 
 def _write_response(handle, response):
-    handle.write(
-        (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
-    )
+    handle.write((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
     handle.flush()
 
 
@@ -337,13 +501,13 @@ def handle_connection(conn, broker, stop_event):
         if uid is None:
             _write_response(
                 conn.makefile("wb"),
-                _error(None, "Tidak dapat mengesahkan UID klien"),
+                _error(None, "Could not verify the client UID"),
             )
             return
         if uid != os.getuid():
             _write_response(
                 conn.makefile("wb"),
-                _error(None, "Akses ditolak: UID klien berbeza"),
+                _error(None, "Access denied: client UID differs"),
             )
             return
         handle = conn.makefile("rwb")
@@ -355,19 +519,17 @@ def handle_connection(conn, broker, stop_event):
             if not raw:
                 return
             if len(raw) > MAX_LINE:
-                _write_response(handle, _error(None, "Permintaan terlalu besar"))
+                _write_response(handle, _error(None, "The request is too large"))
                 return
             if not raw.strip():
                 continue
             try:
                 request = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                _write_response(handle, _error(None, "JSON tidak sah: %s" % exc))
+                _write_response(handle, _error(None, "Invalid JSON: %s" % exc))
                 continue
             if isinstance(request, dict) and request.get("op") == "shutdown":
-                _write_response(
-                    handle, _ok(request.get("id"), {"shutdown": True})
-                )
+                _write_response(handle, _ok(request.get("id"), {"shutdown": True}))
                 stop_event.set()
                 return
             response = dispatch(broker, request)
@@ -399,7 +561,7 @@ def run_daemon():
     try:
         os.makedirs(directory, mode=0o700, exist_ok=True)
     except OSError as exc:
-        print("KimAI gagal menyediakan direktori socket: %s" % exc, file=sys.stderr)
+        print("KimAI could not prepare the socket directory: %s" % exc, file=sys.stderr)
         return 1
 
     if os.path.lexists(path):
@@ -409,17 +571,17 @@ def run_daemon():
             is_socket = False
         if not is_socket:
             print(
-                "Laluan %s wujud tetapi bukan socket; tidak dihapus" % path,
+                "%s exists but is not a socket; leaving it alone" % path,
                 file=sys.stderr,
             )
             return 1
         if _socket_is_live(path):
-            print("KimAI sudah berjalan di %s" % path, file=sys.stderr)
+            print("KimAI is already running at %s" % path, file=sys.stderr)
             return 1
         try:
             os.unlink(path)
         except OSError as exc:
-            print("KimAI gagal memadam socket lama: %s" % exc, file=sys.stderr)
+            print("KimAI could not remove the stale socket: %s" % exc, file=sys.stderr)
             return 1
 
     old_umask = os.umask(0o077)
@@ -431,13 +593,13 @@ def run_daemon():
     except OSError as exc:
         server.close()
         os.umask(old_umask)
-        print("KimAI gagal mengikat socket %s: %s" % (path, exc), file=sys.stderr)
+        print("KimAI could not bind %s: %s" % (path, exc), file=sys.stderr)
         return 1
     finally:
         os.umask(old_umask)
 
     if stat.S_IMODE(os.stat(path).st_mode) != 0o600:
-        print("KimAI gagal menetapkan mod socket 0600", file=sys.stderr)
+        print("KimAI could not set socket mode 0600", file=sys.stderr)
         server.close()
         return 1
 
@@ -451,7 +613,7 @@ def run_daemon():
     signal.signal(signal.SIGINT, _handle_signal)
 
     print(
-        "KimAI %s mendengar di %s (mod 0600)" % (VERSION, path),
+        "KimAI %s listening on %s (mode 0600)" % (VERSION, path),
         file=sys.stderr,
         flush=True,
     )
@@ -477,7 +639,7 @@ def run_daemon():
                 os.unlink(path)
         except OSError:
             pass
-        print("KimAI berhenti.", file=sys.stderr, flush=True)
+        print("KimAI stopped.", file=sys.stderr, flush=True)
     return 0
 
 
@@ -495,20 +657,18 @@ def rpc(op, args=None, timeout=8.0):
     try:
         client.connect(path)
         client.settimeout(timeout)
-        client.sendall(
-            (json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8")
-        )
+        client.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
         handle = client.makefile("rb")
         raw = handle.readline(MAX_LINE + 1)
         if not raw:
             raise ClientError(NOT_RUNNING)
         if len(raw) > MAX_LINE:
-            raise ClientError("Respons KimAI terlalu besar")
+            raise ClientError("The KimAI response is too large")
         response = json.loads(raw.decode("utf-8"))
         if not isinstance(response, dict):
-            raise ClientError("Respons KimAI tidak sah")
+            raise ClientError("The KimAI response is invalid")
         if response.get("id") != request["id"]:
-            raise ClientError("Respons KimAI tidak sepadan dengan permintaan")
+            raise ClientError("The KimAI response does not match the request")
         return response
     except (OSError, TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
         raise ClientError(NOT_RUNNING)
@@ -530,11 +690,12 @@ def _not_running():
 
 def _usage(stream=sys.stdout):
     stream.write(
-        "Penggunaan:\n"
+        "Usage:\n"
         "  kimai start\n"
         "  kimai stop\n"
         "  kimai status\n"
         '  kimai ask "<prompt>"\n'
+        "  kimai events [--limit N]\n"
         "  kimai approve list\n"
         '  kimai approve yes <request_id> [--note "..."]\n'
         '  kimai approve no  <request_id> [--note "..."]\n'
@@ -549,8 +710,25 @@ def _parse_note(parts):
             note = parts[index + 1]
             index += 2
         else:
-            raise ValueError("pilihan tidak dikenali: %s" % parts[index])
+            raise ValueError("unknown option: %s" % parts[index])
     return note
+
+
+def _parse_limit(parts, default=10):
+    limit = default
+    index = 0
+    while index < len(parts):
+        if parts[index] == "--limit" and index + 1 < len(parts):
+            try:
+                limit = int(parts[index + 1])
+            except ValueError:
+                raise ValueError("--limit expects an integer")
+            if limit < 0:
+                raise ValueError("--limit must not be negative")
+            index += 2
+        else:
+            raise ValueError("unknown option: %s" % parts[index])
+    return limit
 
 
 def _format_args(value):
@@ -564,13 +742,13 @@ def _show_list(result):
     pending = result.get("pending") or []
     recent = result.get("recent") or []
     if not pending and not recent:
-        print("Tiada permintaan kelulusan.")
+        print("No approval requests.")
         return
     if pending:
-        print("Menunggu kelulusan (%d):" % len(pending))
+        print("Awaiting approval (%d):" % len(pending))
         for entry in pending:
             print(
-                "  %s  %s:%s  risiko=%s"
+                "  %s  %s:%s  risk=%s"
                 % (
                     entry.get("request_id"),
                     entry.get("tool"),
@@ -579,16 +757,16 @@ def _show_list(result):
                 )
             )
             if entry.get("reason"):
-                print("    sebab: %s" % entry["reason"])
+                print("    reason: %s" % entry["reason"])
             print("    args: %s" % _format_args(entry.get("args")))
-            print("    diminta: %s" % entry.get("ts"))
+            print("    requested: %s" % entry.get("ts"))
     else:
-        print("Tiada permintaan menunggu kelulusan.")
+        print("No pending approval requests.")
     if recent:
-        print("Keputusan terkini (%d):" % len(recent))
+        print("Recent decisions (%d):" % len(recent))
         for entry in recent:
             print(
-                "  [%s] %s  %s:%s  nota=%s"
+                "  [%s] %s  %s:%s  note=%s"
                 % (
                     entry.get("decision"),
                     entry.get("request_id"),
@@ -597,6 +775,23 @@ def _show_list(result):
                     entry.get("note") or "-",
                 )
             )
+
+
+def _show_events(limit):
+    events = read_events(limit)
+    if not events:
+        print("No events recorded.")
+        return
+    for entry in reversed(events):
+        print(
+            "%s  %-8s  %-14s  %s"
+            % (
+                entry.get("ts", "-"),
+                entry.get("severity", "-"),
+                entry.get("kind", "-"),
+                entry.get("summary", "-"),
+            )
+        )
 
 
 def main(argv):
@@ -618,7 +813,7 @@ def main(argv):
         except ClientError:
             return _not_running()
         if not response.get("ok"):
-            _print_error(response.get("error", "KimAI gagal berhenti"))
+            _print_error(response.get("error", "KimAI failed to stop"))
             return 1
         try:
             path = socket_path()
@@ -626,7 +821,7 @@ def main(argv):
                 os.unlink(path)
         except OSError:
             pass
-        print("KimAI dihentikan.")
+        print("KimAI stopped.")
         return 0
     if command == "status":
         try:
@@ -634,13 +829,21 @@ def main(argv):
         except ClientError:
             return _not_running()
         if not response.get("ok"):
-            _print_error(response.get("error", "KimAI gagal memberi status"))
+            _print_error(response.get("error", "KimAI failed to report status"))
             return 1
         print(
             json.dumps(
                 response.get("result", {}), ensure_ascii=False, indent=2, sort_keys=True
             )
         )
+        return 0
+    if command == "events":
+        try:
+            limit = _parse_limit(argv[2:])
+        except ValueError as exc:
+            _print_error(str(exc))
+            return 2
+        _show_events(limit)
         return 0
     if command == "ask":
         if len(argv) < 3:
@@ -673,7 +876,7 @@ def main(argv):
             except ClientError:
                 return _not_running()
             if not response.get("ok"):
-                _print_error(response.get("error", "KimAI gagal menyenaraikan"))
+                _print_error(response.get("error", "KimAI failed to list requests"))
                 return 1
             _show_list(response.get("result", {}))
             return 0
@@ -687,7 +890,7 @@ def main(argv):
             except ValueError as exc:
                 _print_error(str(exc))
                 return 2
-            decision = "lulus" if action == "yes" else "tolak"
+            decision = "approve" if action == "yes" else "reject"
             try:
                 response = rpc(
                     "approve.decide",
@@ -697,12 +900,12 @@ def main(argv):
             except ClientError:
                 return _not_running()
             if not response.get("ok"):
-                _print_error(response.get("error", "KimAI gagal merekod keputusan"))
+                _print_error(response.get("error", "KimAI failed to record the decision"))
                 return 1
-            if decision == "lulus":
-                print("Permintaan %s diluluskan." % request_id)
+            if decision == "approve":
+                print("Request %s approved." % request_id)
             else:
-                print("Permintaan %s ditolak." % request_id)
+                print("Request %s rejected." % request_id)
             return 0
         _usage(sys.stderr)
         return 2

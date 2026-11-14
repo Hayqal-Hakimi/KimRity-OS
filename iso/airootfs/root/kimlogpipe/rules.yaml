@@ -1,0 +1,58 @@
+# KimLogPipe v2 - rule and threshold definitions.
+# Every threshold is DATA. The engine hardcodes no threshold value.
+version: 2
+
+rules:
+  - name: ssh_bruteforce
+    enabled: true
+    severity: high
+    description: "Five or more failed SSH authentication signals from the same src_ip inside a five-minute window."
+    type: threshold
+    threshold: 5
+    window_seconds: 300
+    cooldown_seconds: 900
+    key: src_ip
+    # Normal failure signals plus the 'drop connection' signal produced when
+    # sshd PerSourcePenalties truncates the log.
+    signals:
+      - ssh_auth_failed
+      - ssh_invalid_user
+      - ssh_drop
+
+  - name: sudo_fail
+    enabled: true
+    severity: high
+    description: "Any failed sudo or su authentication."
+    type: any_failed
+    cooldown_seconds: 300
+    actions:
+      - sudo_fail
+      - su_fail
+    # Used to tell 'no sudo/su record' (not evaluable) apart from
+    # 'records exist but none failed' (no match).
+    domain_actions:
+      - sudo
+      - sudo_fail
+      - su
+      - su_fail
+
+  - name: audit_exec_watch
+    enabled: true
+    severity: medium
+    description: "Execution of a watched binary through execve (auditd)."
+    type: exec_watch
+    cooldown_seconds: 600
+    watch:
+      - nmap
+      - nc
+      - curl
+      - wget
+
+  - name: etc_watch
+    enabled: true
+    severity: medium
+    description: "A change under a path watched by auditd with the key etc_watch."
+    type: any_match
+    cooldown_seconds: 600
+    actions:
+      - etc_change

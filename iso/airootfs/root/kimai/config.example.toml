@@ -1,0 +1,16 @@
+# KimAI v0.2 - example configuration (optional)
+#
+# Copy this file to ~/.config/kimai/config.toml to enable the "ask" op.
+# Without this file, "kimai ask" returns "AI is not configured".
+#
+# KimAI itself makes no network calls. The command you list here runs
+# locally, receives the prompt on stdin and its stdout becomes the answer.
+# Choosing a command that talks to a remote model is your decision, not
+# KimAI's default.
+#
+# command = "/usr/local/bin/local-llm --stdin"
+#
+# The table form is also accepted:
+#
+# [ai]
+# command = "/usr/local/bin/local-llm --stdin"

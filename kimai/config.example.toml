@@ -1,14 +1,16 @@
-# KimAI v1 - contoh konfigurasi (pilihan)
+# KimAI v0.2 - example configuration (optional)
 #
-# Salin fail ini ke ~/.config/kimai/config.toml untuk mengaktifkan op "ask".
-# Tanpa fail ini, "kimai ask" akan memulangkan "AI belum dikonfigurasi".
+# Copy this file to ~/.config/kimai/config.toml to enable the "ask" op.
+# Without this file, "kimai ask" returns "AI is not configured".
 #
-# v1 TIDAK membuat panggilan rangkaian. Hanya perintah LOKAL dibenarkan.
-# Prompt dihantar melalui stdin dan stdout perintah dikembalikan sebagai jawapan.
+# KimAI itself makes no network calls. The command you list here runs
+# locally, receives the prompt on stdin and its stdout becomes the answer.
+# Choosing a command that talks to a remote model is your decision, not
+# KimAI's default.
 #
-# command = "/usr/local/bin/llm-lokal --stdin"
+# command = "/usr/local/bin/local-llm --stdin"
 #
-# Bentuk jadual juga diterima:
+# The table form is also accepted:
 #
 # [ai]
-# command = "/usr/local/bin/llm-lokal --stdin"
+# command = "/usr/local/bin/local-llm --stdin"

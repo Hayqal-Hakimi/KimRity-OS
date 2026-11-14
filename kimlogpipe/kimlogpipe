@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""KimLogPipe v1 - normalisasi log system + pengesanan berasaskan ambang.
+"""KimLogPipe v2 - one event schema for system logs, threshold rules, live follow.
 
-Tiada AI, tiada model, tiada rangkaian. Semua data kekal dalam
+No AI, no model and no network. All data stays inside
 $XDG_DATA_HOME/kimlogpipe/ (fallback ~/.local/share/kimlogpipe/).
+
+Two modes:
+
+* one-shot - ``ingest`` reads a fixture or a snapshot, ``detect`` evaluates the
+  rules, ``report`` prints a human summary.
+* live - ``follow`` keeps reading ``journalctl -f`` and the audit log, writes
+  events as they arrive and pushes new findings to KimAI over its Unix socket.
+  If KimAI is down the pipeline keeps running in tools-only mode.
+
+The event schema is deliberately small and uniform so every finding can be
+traced back to a raw log line:
+
+    {"ts","source","host","user","src_ip","action","outcome","raw_ref","path"}
 """
 
 from __future__ import annotations
@@ -11,20 +24,47 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import signal
+import socket
 import subprocess
 import sys
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+import threading
+import time
+import uuid
+from collections import Counter, deque
+from datetime import datetime, timezone
 from pathlib import Path
 
 APP = "kimlogpipe"
-VERSION = "1.0"
+VERSION = "2.0"
 SCRIPT_DIR = Path(__file__).resolve().parent
-RULES_PATH = SCRIPT_DIR / "rules.yaml"
+
+
+def _rules_path() -> Path:
+    """Find rules.yaml: explicit env, next to the script, then the install path."""
+    override = os.environ.get("KIMLOGPIPE_RULES", "").strip()
+    if override:
+        return Path(override)
+    for candidate in (
+        SCRIPT_DIR / "rules.yaml",
+        Path("/usr/local/share/kimlogpipe/rules.yaml"),
+        Path("/etc/kimlogpipe/rules.yaml"),
+    ):
+        if candidate.is_file():
+            return candidate
+    return SCRIPT_DIR / "rules.yaml"
+
+
+RULES_PATH = _rules_path()
 AUDIT_LOG = os.environ.get("KIMLOGPIPE_AUDIT_LOG", "/var/log/audit/audit.log")
 JOURNAL_LINES = int(os.environ.get("KIMLOGPIPE_JOURNAL_LINES", "2000"))
+FLUSH_SECONDS = float(os.environ.get("KIMLOGPIPE_FLUSH_SECONDS", "1.0"))
+RING_SIZE = int(os.environ.get("KIMLOGPIPE_RING", "5000"))
+EVENT_ROTATE_BYTES = 20 * 1024 * 1024
+DEFAULT_COOLDOWN = 900
+ALERT_STATE_LIMIT = 500
 
 PLACEHOLDERS = {
     "",
@@ -38,13 +78,16 @@ PLACEHOLDERS = {
     "4294967295",
 }
 
+# Files watched by the etc_watch rule use this audit key.
+ETC_WATCH_KEY = "etc_watch"
+
 # ---------------------------------------------------------------------------
-# Utiliti umum
+# General helpers
 # ---------------------------------------------------------------------------
 
 
 def data_dir() -> Path:
-    """Direktori storan. XDG_DATA_HOME diutamakan, kemudian ~/.local/share."""
+    """Storage directory. XDG_DATA_HOME first, then ~/.local/share."""
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     base = Path(xdg) if xdg else Path.home() / ".local" / "share"
     d = base / APP
@@ -53,7 +96,7 @@ def data_dir() -> Path:
 
 
 def iso_ts(epoch: float) -> str:
-    """Epoch -> ISO8601 UTC dengan mikrosaat (contoh 2026-10-26T10:01:59.317763Z)."""
+    """Epoch -> ISO8601 UTC with microseconds (e.g. 2026-10-26T10:01:59.317763Z)."""
     dt = datetime.fromtimestamp(epoch, timezone.utc)
     return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
@@ -67,17 +110,17 @@ def now_iso() -> str:
 
 
 def log(msg: str) -> None:
-    print(msg)
+    print(msg, flush=True)
 
 
 def die(msg: str, code: int = 1) -> "NoReturn":
-    print(f"RALAT: {msg}", file=sys.stderr)
+    print(f"ERROR: {msg}", file=sys.stderr, flush=True)
     sys.exit(code)
 
 
 # ---------------------------------------------------------------------------
-# Parser YAML mini (fallback jika PyYAML tiada). Hanya menyokong subset
-# yang digunakan oleh rules.yaml: peta, senarai, skalar, senarai inline.
+# Mini YAML parser (fallback when PyYAML is absent). Supports only the subset
+# used by rules.yaml: maps, lists, scalars and inline lists.
 # ---------------------------------------------------------------------------
 
 
@@ -234,7 +277,7 @@ def mini_yaml_load(text: str):
 
 def load_rules() -> dict:
     if not RULES_PATH.is_file():
-        die(f"fail peraturan tidak dijumpai: {RULES_PATH}")
+        die(f"rules file not found: {RULES_PATH}")
     text = RULES_PATH.read_text(encoding="utf-8")
     force_mini = os.environ.get("KIMLOGPIPE_FORCE_MINI_YAML") == "1"
     data = None
@@ -249,24 +292,24 @@ def load_rules() -> dict:
         try:
             data = mini_yaml_load(text)
         except Exception as exc:  # pragma: no cover - fail-fast
-            die(f"gagal menghurai rules.yaml: {exc}")
+            die(f"could not parse rules.yaml: {exc}")
     if not isinstance(data, dict) or not isinstance(data.get("rules"), list):
-        die("rules.yaml tidak sah: kunci 'rules' (senarai) diperlukan")
+        die("invalid rules.yaml: the 'rules' key (a list) is required")
     names = set()
     for r in data["rules"]:
         if not isinstance(r, dict):
-            die("rules.yaml tidak sah: setiap peraturan mesti peta")
+            die("invalid rules.yaml: every rule must be a map")
         for key in ("name", "type", "severity"):
             if not r.get(key):
-                die(f"rules.yaml tidak sah: peraturan tiada '{key}'")
+                die(f"invalid rules.yaml: a rule is missing '{key}'")
         if r["name"] in names:
-            die(f"rules.yaml tidak sah: nama peraturan berganda '{r['name']}'")
+            die(f"invalid rules.yaml: duplicate rule name '{r['name']}'")
         names.add(r["name"])
     return data
 
 
 # ---------------------------------------------------------------------------
-# Parser journald
+# journald parser
 # ---------------------------------------------------------------------------
 
 J_SSH_FAIL = (
@@ -301,23 +344,38 @@ def journald_user(msg: str) -> str:
 
 
 def _prefix_user(msg: str) -> str:
-    """Pengguna daripada format 'sudo: root : ...' / 'root : ...'."""
+    """User from the 'sudo: root : ...' / 'root : ...' prefix."""
     m = re.match(r"^(?:sudo|su)(?:\[\d+\])?:\s+([A-Za-z0-9_.@-]+)\s*:", msg)
     if m:
         return m.group(1)
     m = re.match(r"^\s*([A-Za-z0-9_.@-]+)\s*:", msg)
-    if m and m.group(1).lower() not in ("sudo", "su", "aide", "pam_unix"):
+    if m and m.group(1).lower() not in ("sudo", "su", "pam_unix"):
         return m.group(1)
     return ""
 
 
 def journald_ip(msg: str) -> str:
+    """Remote address from a log line.
+
+    sshd uses more than one shape, so the patterns are ordered from the most
+    specific to the most generic:
+
+        Failed password for root from 203.0.113.9 port 41022 ssh2
+        drop connection #0 from [10.0.2.2]:60362 on [10.0.2.15]:22 penalty:
+        Connection closed by 10.0.2.2 port 60206 [preauth]
+        Connection closed by authenticating user root 10.0.2.2 port 60316
+
+    The last form is why the generic ``<ipv4> port <n>`` fallback exists: the
+    words "authenticating user root" sit between "by" and the address.
+    """
     ip = _first(
         [
-            r"\bfrom ([0-9A-Fa-f:.]+) port \d+",
-            r"\bby ([0-9A-Fa-f:.]+) port \d+",
+            r"\bfrom \[?([0-9A-Fa-f:.]+)\]? port \d+",
+            r"\bfrom \[([0-9A-Fa-f:.]+)\]:\d+",
+            r"\bby \[?([0-9A-Fa-f:.]+)\]? port \d+",
             r"\brhost=([^\s;]+)",
             r"\baddr=([^\s;'\"]+)",
+            r"([0-9]{1,3}(?:\.[0-9]{1,3}){3}) port \d+",
         ],
         msg,
     )
@@ -325,7 +383,7 @@ def journald_ip(msg: str) -> str:
 
 
 def classify_journald(rec: dict):
-    """Pulangkan (action, outcome, user, src_ip) daripada satu rekod journald."""
+    """Return (action, outcome, user, src_ip) for one journald record."""
     msg = str(rec.get("MESSAGE", "") or "")
     ident = str(rec.get("SYSLOG_IDENTIFIER", "") or "")
     comm = str(rec.get("_COMM", "") or "")
@@ -343,8 +401,8 @@ def classify_journald(rec: dict):
             return "ssh_invalid_user", "failed", user, ip
         if any(k in low for k in J_SSH_FAIL):
             return "ssh_auth_failed", "failed", user, ip
-        # PerSourcePenalties memotong log: isyarat kegagalan boleh muncul
-        # sebagai "drop connection" atau "Connection closed ... [preauth]".
+        # PerSourcePenalties truncates the log: a failed attempt can show up
+        # as "drop connection" or "Connection closed ... [preauth]".
         if "drop connection" in low or ("closed by" in low and "[preauth]" in low):
             return "ssh_drop", "failed", user, ip
         if "session opened" in low:
@@ -398,19 +456,6 @@ def classify_journald(rec: dict):
             return "su_fail", "failed", user, ip
         return "su", "unknown", user, ip
 
-    if "aide" in low and any(
-        k in low
-        for k in (
-            "added",
-            "removed",
-            "changed",
-            "differences",
-            "file changes",
-            "changed files",
-        )
-    ):
-        return "aide_change", "unknown", user, ip
-
     if "authentication failure" in low:
         return "auth_failed", "failed", user, ip
     return "log", "unknown", user, ip
@@ -427,12 +472,12 @@ def journald_ts(rec: dict):
 
 
 def parse_journald_line(rec: dict, raw_ref: str):
-    """Rekod journald -> event seragam, atau (None, sebab)."""
+    """journald record -> uniform event, or (None, reason)."""
     if not isinstance(rec, dict):
-        return None, "JSON bukan objek"
+        return None, "JSON is not an object"
     epoch = journald_ts(rec)
     if epoch is None:
-        return None, "medan __REALTIME_TIMESTAMP tiada/tidak sah"
+        return None, "__REALTIME_TIMESTAMP missing or invalid"
     action, outcome, user, ip = classify_journald(rec)
     event = {
         "ts": iso_ts(epoch),
@@ -443,20 +488,19 @@ def parse_journald_line(rec: dict, raw_ref: str):
         "action": action,
         "outcome": outcome,
         "raw_ref": raw_ref,
+        "path": "",
     }
     return event, None
 
 
 # ---------------------------------------------------------------------------
-# Parser auditd
+# auditd parser
 # ---------------------------------------------------------------------------
 
 AUDIT_HDR = re.compile(
     r"^(?:node=(\S+)\s+)?type=([A-Z0-9_]+)\s+msg=audit\((\d+(?:\.\d+)?):(\d+)\):\s*(.*)$"
 )
-AUDIT_KV = re.compile(
-    r"([A-Za-z_][\w-]*)=(\"(?:[^\"\\]|\\.)*\"|'[^']*'|\S+)"
-)
+AUDIT_KV = re.compile(r"([A-Za-z_][\w-]*)=(\"(?:[^\"\\]|\\.)*\"|'[^']*'|\S+)")
 AUDIT_INNER_TYPES = {
     "USER_AUTH",
     "USER_ACCT",
@@ -484,6 +528,7 @@ AUDIT_PRIORITY = [
     "SYSCALL",
     "EXECVE",
     "BPF",
+    "PATH",
     "PROCTITLE",
 ]
 
@@ -566,17 +611,51 @@ def audit_outcome(recs) -> str:
     return "unknown"
 
 
-def build_audit_event(recs, raw_ref: str):
-    primary = None
+def pick_primary(recs):
     for rtype in AUDIT_PRIORITY:
         for r in recs:
             if r["type"] == rtype:
-                primary = r
-                break
-        if primary:
-            break
-    if primary is None:
-        primary = recs[0]
+                return r
+    return recs[0]
+
+
+def audit_watch_key(recs) -> str:
+    for r in recs:
+        val = r["fields"].get("key", "")
+        if val and val.lower() not in PLACEHOLDERS:
+            return val
+    return ""
+
+
+def audit_path(recs) -> str:
+    """Affected path, preferring the real target over a PARENT record.
+
+    A watched write produces ``item=0 name=/etc/hosts nametype=CREATE`` and
+    ``item=1 name=/etc/ nametype=PARENT``. Returning the parent directory would
+    hide which file actually changed.
+    """
+    fallback = ""
+    for r in recs:
+        if r["type"] != "PATH":
+            continue
+        val = r["fields"].get("name", "")
+        if not val or val.lower() in PLACEHOLDERS:
+            continue
+        if r["fields"].get("nametype", "").upper() == "PARENT":
+            fallback = fallback or val
+            continue
+        return val
+    if fallback:
+        return fallback
+    for r in recs:
+        val = r["fields"].get("name", "")
+        if val and val.lower() not in PLACEHOLDERS:
+            return val
+    return ""
+
+
+def build_audit_event(recs, source_label: str):
+    primary = pick_primary(recs)
     by_type = {}
     for r in recs:
         by_type.setdefault(r["type"], r)
@@ -584,8 +663,18 @@ def build_audit_event(recs, raw_ref: str):
     outcome = audit_outcome(recs)
     user = audit_user(recs)
     ip = audit_ip(recs)
+    path = audit_path(recs)
+    watch_key = audit_watch_key(recs)
 
-    if "USER_AUTH" in by_type:
+    # Loading a watch rule (augenrules --load, auditctl -w) emits a
+    # CONFIG_CHANGE record that carries the same key as the watch itself, plus
+    # a SYSCALL and a PATH record with nametype=PARENT. That is rule
+    # bookkeeping, not a file change, so it must not be reported as etc_change.
+    if watch_key and "CONFIG_CHANGE" in by_type:
+        action = "audit_rule_load"
+    elif watch_key == ETC_WATCH_KEY and path:
+        action = "etc_change"
+    elif "USER_AUTH" in by_type:
         r = by_type["USER_AUTH"]
         exe = r["inner"].get("exe") or r["fields"].get("exe", "")
         base = os.path.basename(exe)
@@ -612,10 +701,10 @@ def build_audit_event(recs, raw_ref: str):
                 exe = sc["fields"].get("exe", "")
             if not exe and "EXECVE" in by_type:
                 exe = by_type["EXECVE"]["fields"].get("a0", "")
-            base = os.path.basename(exe.strip("\"'")) or "tidak-diketahui"
+            base = os.path.basename(exe.strip("\"'")) or "unknown"
             action = f"execve:{base}"
         else:
-            action = f"syscall:{name or 'tidak-diketahui'}"
+            action = f"syscall:{name or 'unknown'}"
     else:
         action = recs[0]["type"].lower()
 
@@ -634,17 +723,18 @@ def build_audit_event(recs, raw_ref: str):
         "src_ip": ip,
         "action": action,
         "outcome": outcome,
-        "raw_ref": raw_ref,
+        "raw_ref": f"{source_label}:{primary['lineno']}",
+        "path": path,
     }
 
 
 def parse_audit_file(path: Path):
     events, raw_map, invalid, lines_read = [], {}, 0, 0
-    groups = {}  # serial -> senarai rekod (tertib kemunculan dikekalkan)
+    groups = {}  # serial -> list of records (insertion order preserved)
     try:
         fh = path.open("r", encoding="utf-8", errors="replace")
     except OSError as exc:
-        die(f"tidak dapat membaca {path}: {exc}")
+        die(f"cannot read {path}: {exc}")
     with fh:
         for lineno, raw in enumerate(fh, 1):
             lines_read += 1
@@ -658,26 +748,16 @@ def parse_audit_file(path: Path):
             rec["lineno"] = lineno
             rec["raw"] = raw
             groups.setdefault(rec["serial"], []).append(rec)
-    for serial, recs in groups.items():
-        primary = None
-        for rtype in AUDIT_PRIORITY:
-            for r in recs:
-                if r["type"] == rtype:
-                    primary = r
-                    break
-            if primary:
-                break
-        if primary is None:
-            primary = recs[0]
-        raw_ref = f"{path}:{primary['lineno']}"
-        event = build_audit_event(recs, raw_ref)
+    for _serial, recs in groups.items():
+        primary = pick_primary(recs)
+        event = build_audit_event(recs, str(path))
         events.append(event)
-        raw_map[raw_ref] = primary["raw"]
+        raw_map[event["raw_ref"]] = primary["raw"]
     return events, raw_map, invalid, lines_read
 
 
 # ---------------------------------------------------------------------------
-# Storan
+# Storage
 # ---------------------------------------------------------------------------
 
 
@@ -689,8 +769,67 @@ def findings_path() -> Path:
     return data_dir() / "findings.json"
 
 
+def findings_log_path() -> Path:
+    return data_dir() / "findings.jsonl"
+
+
 def raw_path() -> Path:
     return data_dir() / "rawlines.jsonl"
+
+
+def state_path() -> Path:
+    return data_dir() / "state.json"
+
+
+def _count_newlines(path: Path) -> int:
+    """Count newlines in chunks, without holding the file in memory."""
+    total = 0
+    try:
+        with path.open("rb") as fh:
+            while True:
+                chunk = fh.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += chunk.count(b"\n")
+    except OSError:
+        return 0
+    return total
+
+
+def _count_lines(path: Path) -> int:
+    if not path.is_file():
+        return 0
+    total = 0
+    try:
+        with path.open("rb") as fh:
+            for line in fh:
+                if line.strip():
+                    total += 1
+    except OSError:
+        return 0
+    return total
+
+
+def tail_lines(path: Path, count: int):
+    """Return the last `count` non-empty lines without reading the whole file."""
+    if not path.is_file() or count <= 0:
+        return []
+    try:
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            block = 65536
+            data = b""
+            pos = size
+            while pos > 0 and data.count(b"\n") <= count:
+                step = min(block, pos)
+                pos -= step
+                fh.seek(pos)
+                data = fh.read(step) + data
+        lines = data.splitlines()[-count:]
+        return [ln.decode("utf-8", "replace") for ln in lines if ln.strip()]
+    except OSError:
+        return []
 
 
 def load_events():
@@ -709,6 +848,18 @@ def load_events():
                 continue
             if isinstance(obj, dict):
                 out.append(obj)
+    return out
+
+
+def load_events_tail(count: int):
+    out = []
+    for line in tail_lines(events_path(), count):
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
     return out
 
 
@@ -737,8 +888,16 @@ def atomic_write(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
-def store_events(new_events, new_raw) -> tuple[int, int]:
-    """Tambah peristiwa baharu, dedupe ikut ts+source+action+raw_ref."""
+def _rotate_if_big(path: Path, limit: int = EVENT_ROTATE_BYTES) -> None:
+    try:
+        if path.is_file() and path.stat().st_size > limit:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+
+
+def store_events(new_events, new_raw) -> tuple:
+    """Add new events, dedupe by ts+source+action+raw_ref (one-shot ingest)."""
     existing = load_events()
     seen = {
         (e.get("ts"), e.get("source"), e.get("action"), e.get("raw_ref"))
@@ -774,8 +933,109 @@ def store_events(new_events, new_raw) -> tuple[int, int]:
     return added, dupes
 
 
+def append_events(events, raw_pairs) -> None:
+    """Append events and their raw evidence (live mode, no rewrite)."""
+    if not events and not raw_pairs:
+        return
+    _rotate_if_big(events_path())
+    _rotate_if_big(raw_path())
+    if events:
+        with events_path().open("a", encoding="utf-8") as fh:
+            for ev in events:
+                fh.write(json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    if raw_pairs:
+        with raw_path().open("a", encoding="utf-8") as fh:
+            for ref, line in raw_pairs:
+                fh.write(
+                    json.dumps({"raw_ref": ref, "line": line}, ensure_ascii=False) + "\n"
+                )
+            fh.flush()
+            os.fsync(fh.fileno())
+
+
+def load_state() -> dict:
+    path = state_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_state(state: dict) -> None:
+    state["updated_at"] = now_iso()
+    try:
+        atomic_write(state_path(), json.dumps(state, ensure_ascii=False, indent=2) + "\n")
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
-# Ingest
+# KimAI client (tools-only fallback when the broker is down)
+# ---------------------------------------------------------------------------
+
+
+def kimai_socket_path() -> Path:
+    override = os.environ.get("KIMAI_SOCKET", "").strip()
+    if override:
+        return Path(override)
+    candidates = []
+    xdg = os.environ.get("XDG_RUNTIME_DIR", "").strip()
+    if xdg:
+        candidates.append(Path(xdg) / "kimai.sock")
+    candidates.append(Path("/run/user/%d" % os.getuid()) / "kimai.sock")
+    candidates.append(Path.home() / ".cache" / "kimai" / "kimai.sock")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+def kimai_emit(kind, severity, summary, data, timeout=2.0):
+    """Send one finding to KimAI. Return (ok, detail). Never raises."""
+    path = kimai_socket_path()
+    if not path.exists():
+        return False, "socket not found at %s" % path
+    request = {
+        "id": uuid.uuid4().hex,
+        "op": "event",
+        "args": {
+            "source": APP,
+            "kind": kind,
+            "severity": severity,
+            "summary": summary,
+            "data": data,
+        },
+    }
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.settimeout(timeout)
+    try:
+        client.connect(str(path))
+        client.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
+        raw = client.makefile("rb").readline()
+        if not raw:
+            return False, "empty response"
+        response = json.loads(raw.decode("utf-8"))
+        if not isinstance(response, dict):
+            return False, "invalid response"
+        if not response.get("ok"):
+            return False, str(response.get("error", "unknown error"))
+        return True, response.get("result", {}).get("event_id", "")
+    except (OSError, TimeoutError, ValueError):
+        return False, "KimAI did not answer"
+    finally:
+        try:
+            client.close()
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Ingest (one-shot)
 # ---------------------------------------------------------------------------
 
 
@@ -786,7 +1046,7 @@ def ingest_journald_file(path: Path):
     try:
         fh = path.open("r", encoding="utf-8", errors="replace")
     except OSError as exc:
-        die(f"tidak dapat membaca {path}: {exc}")
+        die(f"cannot read {path}: {exc}")
     with fh:
         for lineno, raw in enumerate(fh, 1):
             lines_read += 1
@@ -799,7 +1059,7 @@ def ingest_journald_file(path: Path):
                 invalid += 1
                 continue
             raw_ref = f"{path}:{lineno}"
-            event, reason = parse_journald_line(rec, raw_ref)
+            event, _reason = parse_journald_line(rec, raw_ref)
             if event is None:
                 invalid += 1
                 continue
@@ -813,11 +1073,11 @@ def ingest_journald_live():
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except FileNotFoundError:
-        die("journalctl tidak dijumpai (bukan sistem systemd?)")
+        die("journalctl not found (this is not a systemd system?)")
     except subprocess.TimeoutExpired:
-        die("journalctl tamat masa selepas 60s")
+        die("journalctl timed out after 60s")
     if proc.returncode != 0:
-        die(f"journalctl gagal: {proc.stderr.strip() or 'kod ' + str(proc.returncode)}")
+        die(f"journalctl failed: {proc.stderr.strip() or 'code ' + str(proc.returncode)}")
     events, raw_map = [], {}
     invalid = 0
     lines_read = 0
@@ -831,7 +1091,7 @@ def ingest_journald_live():
         cursor = str(rec.get("__CURSOR", "") or "")
         if not cursor:
             cursor = "journalctl:seq=" + str(rec.get("__SEQNUM", "?"))
-        event, reason = parse_journald_line(rec, cursor)
+        event, _reason = parse_journald_line(rec, cursor)
         if event is None:
             invalid += 1
             continue
@@ -848,12 +1108,12 @@ def cmd_ingest(args):
     if args.file:
         path = Path(args.file).expanduser().resolve()
         if not path.is_file():
-            die(f"fail tidak dijumpai: {path}")
+            die(f"file not found: {path}")
         if args.source == "journald":
             events, raw_map, invalid, lines_read = ingest_journald_file(path)
         else:
             events, raw_map, invalid, lines_read = ingest_audit_file(path)
-        label = f"fail: {path}"
+        label = f"file: {path}"
     else:
         if args.source == "journald":
             events, raw_map, invalid, lines_read = ingest_journald_live()
@@ -861,24 +1121,24 @@ def cmd_ingest(args):
         else:
             path = Path(AUDIT_LOG)
             if not path.is_file():
-                die(f"fail audit langsung tidak dijumpai: {path}")
+                die(f"live audit file not found: {path}")
             events, raw_map, invalid, lines_read = ingest_audit_file(path)
             label = f"live: {path}"
 
     added, dupes = store_events(events, raw_map)
     total = len(load_events())
-    log(f"Sumber            : {args.source} ({label})")
-    log(f"Baris dibaca      : {lines_read}")
-    log(f"Peristiwa dihurai : {len(events)}")
-    log(f"Peristiwa baharu  : {added}")
-    log(f"Pendua dilangkau  : {dupes}")
-    log(f"Baris tidak sah   : {invalid}")
-    log(f"Jumlah dalam stor : {total}")
-    log(f"Stor              : {data_dir()}")
+    log(f"Source            : {args.source} ({label})")
+    log(f"Lines read        : {lines_read}")
+    log(f"Events parsed     : {len(events)}")
+    log(f"New events        : {added}")
+    log(f"Duplicates skipped: {dupes}")
+    log(f"Invalid lines     : {invalid}")
+    log(f"Total in store    : {total}")
+    log(f"Store             : {data_dir()}")
 
 
 # ---------------------------------------------------------------------------
-# Enjin peraturan
+# Rule engine
 # ---------------------------------------------------------------------------
 
 
@@ -888,7 +1148,7 @@ def evidence_for(events, raw_map):
         ref = ev.get("raw_ref", "")
         line = raw_map.get(ref)
         if line is None and ":" in ref:
-            # Fallback: baca semula fail sumber jika sidecar tiada.
+            # Fallback: read the source file again when the sidecar is gone.
             fname, _, lineno = ref.rpartition(":")
             try:
                 with open(fname, "r", encoding="utf-8", errors="replace") as fh:
@@ -913,44 +1173,50 @@ def finding(rule, count, first_ts, last_ts, key, evidence, summary):
         "last_ts": last_ts,
         "key": key,
         "evidence": evidence,
-        "summary_bm": summary,
+        "summary": summary,
     }
+
+
+def _not_evaluable(reason):
+    return "not_evaluable", reason, []
 
 
 def eval_threshold(rule, events, raw_map):
     signals = set(rule.get("signals") or [])
+    key_field = rule.get("key") or "src_ip"
     try:
         threshold = int(rule["threshold"])
         window = int(rule["window_seconds"])
     except (KeyError, TypeError, ValueError):
-        return "not_evaluable", "konfigurasi threshold/window_seconds tidak sah", []
+        return _not_evaluable("threshold/window_seconds is not a valid number")
     if not events:
-        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+        return _not_evaluable("no events in the store/window")
     cands = [e for e in events if e.get("action") in signals]
     if not cands:
         if any(e.get("src_ip") for e in events):
             return (
                 "no_match",
-                "0 isyarat kegagalan (fixture hanya mengandungi log masuk berjaya)",
+                "0 failure signals (the fixture only holds successful logins)",
                 [],
             )
-        return "not_evaluable", "medan src_ip tiada dalam set peristiwa", []
-    cands_ip = [e for e in cands if e.get("src_ip")]
+        return _not_evaluable("the src_ip field is absent from the event set")
+    cands_ip = [e for e in cands if e.get(key_field)]
     if not cands_ip:
-        return "not_evaluable", "medan src_ip tiada pada isyarat kegagalan", []
+        return _not_evaluable("the %s field is absent on failure signals" % key_field)
 
     findings = []
     by_key = {}
     for e in cands_ip:
-        by_key.setdefault(e["src_ip"], []).append(e)
+        by_key.setdefault(e[key_field], []).append(e)
     for key, items in by_key.items():
         items.sort(key=lambda e: epoch_of(e["ts"]))
+        stamps = [epoch_of(e["ts"]) for e in items]
         best = None
+        j = 0
         for i in range(len(items)):
-            j = i
-            while j < len(items) and (
-                epoch_of(items[j]["ts"]) - epoch_of(items[i]["ts"])
-            ) <= window:
+            if j < i:
+                j = i
+            while j < len(items) and stamps[j] - stamps[i] <= window:
                 j += 1
             n = j - i
             if n >= threshold and (best is None or n > best[0]):
@@ -960,8 +1226,8 @@ def eval_threshold(rule, events, raw_map):
         n, i, j = best
         win = items[i:j]
         summary = (
-            f"{n} isyarat kegagalan pengesahan SSH daripada {key} "
-            f"dalam tetingkap {window} saat (ambang {threshold})."
+            f"{n} failed SSH authentication signals from {key} "
+            f"within {window}s (threshold {threshold})."
         )
         findings.append(
             finding(
@@ -977,30 +1243,30 @@ def eval_threshold(rule, events, raw_map):
     if not findings:
         return (
             "no_match",
-            f"{len(cands_ip)} isyarat kegagalan, tiada kunci mencapai ambang "
-            f"{threshold}/{window}s",
+            f"{len(cands_ip)} failure signals, no key reached the "
+            f"{threshold}/{window}s threshold",
             [],
         )
     return "found", "", findings
 
 
-def eval_sudo(rule, events, raw_map):
+def eval_any_failed(rule, events, raw_map):
     actions = set(rule.get("actions") or ["sudo_fail", "su_fail"])
-    domain_actions = set(rule.get("domain_actions") or ["sudo", "sudo_fail", "su", "su_fail"])
+    domain_actions = set(
+        rule.get("domain_actions") or ["sudo", "sudo_fail", "su", "su_fail"]
+    )
     if not events:
-        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+        return _not_evaluable("no events in the store/window")
     domain = [e for e in events if e.get("action") in domain_actions]
     if not domain:
-        return (
-            "not_evaluable",
-            "tiada rekod sudo/su dalam set peristiwa (medan action sudo/su tiada)",
-            [],
+        return _not_evaluable(
+            "no sudo/su record in the event set (no sudo/su action field)"
         )
     failed = [e for e in domain if e.get("action") in actions]
     if not failed:
         return (
             "no_match",
-            f"{len(domain)} rekod sudo/su, tiada kegagalan pengesahan",
+            f"{len(domain)} sudo/su records, no authentication failure",
             [],
         )
     findings = []
@@ -1009,8 +1275,8 @@ def eval_sudo(rule, events, raw_map):
         by_user.setdefault(e.get("user", ""), []).append(e)
     for user, items in by_user.items():
         items.sort(key=lambda e: epoch_of(e["ts"]))
-        label = user or "(pengguna tidak diketahui)"
-        summary = f"{len(items)} pengesahan sudo/su gagal untuk {label}."
+        label = user or "(unknown user)"
+        summary = f"{len(items)} failed sudo/su authentication for {label}."
         findings.append(
             finding(
                 rule,
@@ -1027,13 +1293,11 @@ def eval_sudo(rule, events, raw_map):
 
 def eval_exec_watch(rule, events, raw_map):
     if not events:
-        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
+        return _not_evaluable("no events in the store/window")
     execs = [e for e in events if str(e.get("action", "")).startswith("execve:")]
     if not execs:
-        return (
-            "not_evaluable",
-            "tiada rekod execve (medan syscall/exe tiada dalam set peristiwa)",
-            [],
+        return _not_evaluable(
+            "no execve record (no syscall/exe field in the event set)"
         )
     watch = {str(w).lower() for w in (rule.get("watch") or [])}
     matched = []
@@ -1044,7 +1308,7 @@ def eval_exec_watch(rule, events, raw_map):
     if not matched:
         return (
             "no_match",
-            f"{len(execs)} rekod execve, tiada sepadan senarai pantau",
+            f"{len(execs)} execve records, none matched the watch list",
             [],
         )
     findings = []
@@ -1054,10 +1318,9 @@ def eval_exec_watch(rule, events, raw_map):
         grouped.setdefault((e.get("user", ""), binary), []).append(e)
     for (user, binary), items in grouped.items():
         items.sort(key=lambda e: epoch_of(e["ts"]))
-        label = user or "(pengguna tidak diketahui)"
+        label = user or "(unknown user)"
         summary = (
-            f"Pelaksanaan binari dalam senarai pantau: {binary} oleh {label} "
-            f"({len(items)} kali)."
+            f"Watched binary executed: {binary} by {label} ({len(items)} times)."
         )
         findings.append(
             finding(
@@ -1073,31 +1336,35 @@ def eval_exec_watch(rule, events, raw_map):
     return "found", "", findings
 
 
-def eval_aide(rule, events, raw_map):
+def eval_any_match(rule, events, raw_map):
+    actions = set(rule.get("actions") or [])
     if not events:
-        return "not_evaluable", "tiada peristiwa dalam stor/tetingkap", []
-    matches = [e for e in events if e.get("action") == "aide_change"]
+        return _not_evaluable("no events in the store/window")
+    matches = [e for e in events if e.get("action") in actions]
     if not matches:
         return (
-            "not_evaluable",
-            "tiada baris laporan AIDE (medan action aide_change tiada)",
+            "no_match",
+            f"no record with action {', '.join(sorted(actions)) or '(none)'}",
             [],
         )
     findings = []
     grouped = {}
     for e in matches:
-        grouped.setdefault(e.get("user", ""), []).append(e)
-    for user, items in grouped.items():
+        grouped.setdefault(e.get("path", "") or e.get("user", ""), []).append(e)
+    for key, items in grouped.items():
         items.sort(key=lambda e: epoch_of(e["ts"]))
-        label = user or "(pengguna tidak diketahui)"
-        summary = f"AIDE melaporkan perubahan fail ({len(items)} baris) untuk {label}."
+        label = key or "(no key)"
+        summary = (
+            f"{len(items)} watched-path change(s) for {label} "
+            f"(latest: {items[-1].get('path') or 'unknown'})."
+        )
         findings.append(
             finding(
                 rule,
                 len(items),
                 items[0]["ts"],
                 items[-1]["ts"],
-                user,
+                key,
                 evidence_for(items, raw_map),
                 summary,
             )
@@ -1107,16 +1374,53 @@ def eval_aide(rule, events, raw_map):
 
 EVALUATORS = {
     "threshold": eval_threshold,
-    "any_failed": eval_sudo,
+    "any_failed": eval_any_failed,
     "exec_watch": eval_exec_watch,
-    "any_match": eval_aide,
+    "any_match": eval_any_match,
 }
+
+
+def evaluate(rules, events, raw_map):
+    """Run every rule. Return (per-rule results, flat findings)."""
+    results, flat = [], []
+    for rule in rules:
+        if not rule.get("enabled", True):
+            results.append(
+                {
+                    "rule": rule["name"],
+                    "severity": rule["severity"],
+                    "status": "disabled",
+                    "reason": "disabled in rules.yaml",
+                    "findings": [],
+                }
+            )
+            continue
+        evaluator = EVALUATORS.get(rule.get("type"))
+        if evaluator is None:
+            status, reason, found = (
+                "not_evaluable",
+                f"unknown rule type: {rule.get('type')}",
+                [],
+            )
+        else:
+            status, reason, found = evaluator(rule, events, raw_map)
+        results.append(
+            {
+                "rule": rule["name"],
+                "severity": rule["severity"],
+                "status": status,
+                "reason": reason,
+                "findings": found,
+            }
+        )
+        flat.extend(found)
+    return results, flat
 
 
 def parse_since(text: str) -> float:
     m = re.fullmatch(r"(\d+)([smhd])", text.strip().lower())
     if not m:
-        die("nilai --since tidak sah; guna contoh 30s, 5m, 2h, 1d")
+        die("invalid --since value; examples: 30s, 5m, 2h, 1d")
     val, unit = int(m.group(1)), m.group(2)
     mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
     return val * mult
@@ -1135,61 +1439,30 @@ def cmd_detect(args):
         since_desc = args.since
 
     if not all_events:
-        log("Stor peristiwa kosong. Jalankan `kimlogpipe ingest ...` dahulu.")
+        log("The event store is empty. Run `kimlogpipe ingest ...` first.")
     log(
-        f"Peristiwa dinilai: {len(events)}"
-        + (f" (--since {since_desc})" if since_desc else " (semua)")
+        f"Events evaluated: {len(events)}"
+        + (f" (--since {since_desc})" if since_desc else " (all)")
     )
     log("")
 
-    results = []
-    flat = []
-    for rule in rules_doc["rules"]:
-        if not rule.get("enabled", True):
-            results.append(
-                {
-                    "rule": rule["name"],
-                    "severity": rule["severity"],
-                    "status": "disabled",
-                    "reason": "peraturan dimatikan dalam rules.yaml",
-                    "findings": [],
-                }
-            )
-            log(f"{rule['name']}: dimatikan")
-            continue
-        evaluator = EVALUATORS.get(rule.get("type"))
-        if evaluator is None:
-            status, reason, found = (
-                "not_evaluable",
-                f"jenis peraturan tidak dikenali: {rule.get('type')}",
-                [],
-            )
-        else:
-            status, reason, found = evaluator(rule, events, raw_map)
+    results, flat = evaluate(rules_doc["rules"], events, raw_map)
+    for r in results:
+        status = r["status"]
         if status == "found":
-            log(f"{rule['name']}: {len(found)} dapatan")
-            for f in found:
+            log(f"{r['rule']}: {len(r['findings'])} finding(s)")
+            for f in r["findings"]:
                 log(
-                    f"  - [{f['severity']}] kunci={f['key'] or '(tiada)'} "
-                    f"kiraan={f['count']} {f['first_ts']} .. {f['last_ts']}"
+                    f"  - [{f['severity']}] key={f['key'] or '(none)'} "
+                    f"count={f['count']} {f['first_ts']} .. {f['last_ts']}"
                 )
-                log(f"    {f['summary_bm']}")
+                log(f"    {f['summary']}")
         elif status == "no_match":
-            log(f"{rule['name']}: tiada padanan ({reason})")
+            log(f"{r['rule']}: no match ({r['reason']})")
         elif status == "disabled":
-            log(f"{rule['name']}: dimatikan")
+            log(f"{r['rule']}: disabled")
         else:
-            log(f"{rule['name']}: tidak dapat dinilai ({reason})")
-        results.append(
-            {
-                "rule": rule["name"],
-                "severity": rule["severity"],
-                "status": status,
-                "reason": reason,
-                "findings": found,
-            }
-        )
-        flat.extend(found)
+            log(f"{r['rule']}: not evaluable ({r['reason']})")
 
     doc = {
         "generated_at": now_iso(),
@@ -1198,17 +1471,14 @@ def cmd_detect(args):
         "rules": results,
         "findings": flat,
     }
-    atomic_write(
-        findings_path(),
-        json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
-    )
+    atomic_write(findings_path(), json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
     log("")
-    log(f"Jumlah dapatan: {len(flat)}")
-    log(f"Fail dapatan  : {findings_path()}")
+    log(f"Total findings: {len(flat)}")
+    log(f"Findings file : {findings_path()}")
 
 
 # ---------------------------------------------------------------------------
-# Laporan Bahasa Melayu
+# Report
 # ---------------------------------------------------------------------------
 
 
@@ -1223,58 +1493,60 @@ def cmd_report(_args):
             doc = None
 
     log("=" * 62)
-    log("LAPORAN KIMLOGPIPE v1")
+    log(f"KIMLOGPIPE v{VERSION} REPORT")
     log("=" * 62)
-    log(f"Dijana            : {now_iso()}")
-    log(f"Stor              : {data_dir()}")
+    log(f"Generated         : {now_iso()}")
+    log(f"Store             : {data_dir()}")
+    log(f"Events            : {len(events)}")
+    if events:
+        log(f"Latest event      : {max(e.get('ts', '') for e in events)}")
     log("")
 
-    log("PERISTIWA MENGIKUT SUMBER")
+    log("EVENTS BY SOURCE")
     if not events:
-        log("  (tiada peristiwa; jalankan `kimlogpipe ingest ...`)")
+        log("  (no events; run `kimlogpipe ingest ...`)")
     else:
         counts = Counter(e.get("source", "") for e in events)
         for source, n in sorted(counts.items()):
-            log(f"  {source or '(tidak diketahui)'}: {n}")
-        log(f"  Jumlah: {len(events)}")
+            log(f"  {source or '(unknown)'}: {n}")
+        log(f"  Total: {len(events)}")
     log("")
 
-    log("DAPATAN MENGIKUT PERATURAN")
+    log("FINDINGS BY RULE")
     if doc is None:
-        log("  (belum ada findings.json; jalankan `kimlogpipe detect` dahulu)")
+        log("  (no findings.json yet; run `kimlogpipe detect` first)")
     else:
         if doc.get("since"):
-            log(f"  Tetingkap --since: {doc['since']}")
+            log(f"  --since window: {doc['since']}")
         for r in doc.get("rules", []):
             status = r.get("status")
             if status == "found":
                 log(
-                    f"  {r['rule']} [{r.get('severity','')}]: "
-                    f"{len(r.get('findings', []))} dapatan"
+                    f"  {r['rule']} [{r.get('severity', '')}]: "
+                    f"{len(r.get('findings', []))} finding(s)"
                 )
                 for f in r.get("findings", []):
                     log(
-                        f"    - kunci={f.get('key') or '(tiada)'} "
-                        f"kiraan={f.get('count')} {f.get('first_ts')} .. {f.get('last_ts')}"
+                        f"    - key={f.get('key') or '(none)'} "
+                        f"count={f.get('count')} {f.get('first_ts')} .. {f.get('last_ts')}"
                     )
-                    log(f"      {f.get('summary_bm','')}")
+                    log(f"      {f.get('summary', '')}")
+                    for ev in f.get("evidence", [])[:3]:
+                        log(f"      > {ev.get('raw_ref')}")
             elif status == "no_match":
-                log(f"  {r['rule']} [{r.get('severity','')}]: tiada padanan")
+                log(f"  {r['rule']} [{r.get('severity', '')}]: no match")
                 if r.get("reason"):
-                    log(f"      sebab: {r['reason']}")
+                    log(f"      reason: {r['reason']}")
             elif status == "disabled":
-                log(f"  {r['rule']}: dimatikan")
+                log(f"  {r['rule']}: disabled")
             else:
-                log(
-                    f"  {r['rule']} [{r.get('severity','')}]: "
-                    f"tidak dapat dinilai"
-                )
+                log(f"  {r['rule']} [{r.get('severity', '')}]: not evaluable")
                 if r.get("reason"):
-                    log(f"      sebab: {r['reason']}")
+                    log(f"      reason: {r['reason']}")
     log("")
 
     findings = [] if doc is None else doc.get("findings", [])
-    log("KUNCI TERATAS (src_ip/pengguna)")
+    log("TOP KEYS (src_ip / user / path)")
     key_counts = Counter()
     for f in findings:
         key = f.get("key") or ""
@@ -1282,46 +1554,620 @@ def cmd_report(_args):
             key_counts[key] += int(f.get("count", 0) or 0)
     if key_counts:
         key, n = key_counts.most_common(1)[0]
-        log(f"  {key} ({n} peristiwa dalam dapatan)")
+        log(f"  {key} ({n} events in findings)")
     else:
-        log("  tiada kunci (tiada dapatan)")
+        log("  no key (no findings)")
     log("")
 
-    log("NOTA KAVEAT")
-    log("  - journald tidak kekal secara lalai (Storage=volatile); log lama hilang")
-    log("    selepas reboot jika journal tidak disimpan secara berterusan.")
-    log("  - PerSourcePenalties sshd boleh memotong log; percubaan gagal mungkin")
-    log("    muncul sebagai 'drop connection' dan bukan 'Invalid user'. Kedua-dua")
-    log("    isyarat dikira oleh ssh_bruteforce.")
-    log("  - Dalam VM NAT QEMU, semua sumber luar kelihatan sebagai 10.0.2.2;")
-    log("    kunci src_ip tidak membezakan hos sebenar di luar NAT.")
-    log("  - Peraturan yang tiada data dilaporkan 'tidak dapat dinilai', bukan")
-    log("    'tiada serangan'. Tiada dapatan direka.")
+    log("CAVEATS")
+    log("  - journald is not persistent by default (Storage=volatile); old logs")
+    log("    are lost after a reboot unless the journal is stored persistently.")
+    log("  - sshd PerSourcePenalties can truncate the log; a failed attempt may")
+    log("    appear as 'drop connection' instead of 'Invalid user'. Both signals")
+    log("    are counted by ssh_bruteforce.")
+    log("  - In a QEMU NAT guest every external source looks like 10.0.2.2, so the")
+    log("    src_ip key cannot tell real hosts apart behind the NAT.")
+    log("  - A rule without data is reported as 'not evaluable', never as 'no")
+    log("    attack'. No finding is invented.")
     log("=" * 62)
 
 
 def cmd_rules(_args):
     doc = load_rules()
-    log(f"PERATURAN KIMLOGPIPE v{VERSION}")
+    log(f"KIMLOGPIPE v{VERSION} RULES")
     log("")
     for i, rule in enumerate(doc["rules"], 1):
-        log(f"{i}. {rule['name']} [{rule.get('severity','?')}]")
-        if rule.get("description_bm"):
-            log(f"   {rule['description_bm']}")
+        log(f"{i}. {rule['name']} [{rule.get('severity', '?')}]")
+        if rule.get("description"):
+            log(f"   {rule['description']}")
         rtype = rule.get("type")
         if rtype == "threshold":
             log(
-                f"   Ambang: {rule.get('threshold')} isyarat dalam "
-                f"{rule.get('window_seconds')} saat (kunci: src_ip)"
+                f"   Threshold: {rule.get('threshold')} signals in "
+                f"{rule.get('window_seconds')}s (key: {rule.get('key', 'src_ip')})"
             )
-            log(f"   Isyarat: {', '.join(rule.get('signals') or [])}")
+            log(f"   Signals: {', '.join(rule.get('signals') or [])}")
         elif rtype == "any_failed":
-            log(f"   Tindakan gagal: {', '.join(rule.get('actions') or [])}")
+            log(f"   Failing actions: {', '.join(rule.get('actions') or [])}")
         elif rtype == "exec_watch":
-            log(f"   Senarai pantau: {', '.join(rule.get('watch') or [])}")
+            log(f"   Watch list: {', '.join(rule.get('watch') or [])}")
         elif rtype == "any_match":
-            log(f"   Tindakan: {', '.join(rule.get('actions') or [])}")
+            log(f"   Actions: {', '.join(rule.get('actions') or [])}")
+        if rule.get("cooldown_seconds"):
+            log(f"   Cooldown: {rule['cooldown_seconds']}s")
         log("")
+
+
+# ---------------------------------------------------------------------------
+# Live follow
+# ---------------------------------------------------------------------------
+
+
+class JournaldFollower(threading.Thread):
+    """Read `journalctl -f -o json` in a thread and push lines to a queue."""
+
+    def __init__(self, cursor, out_queue):
+        super().__init__(daemon=True)
+        self.cursor = cursor or ""
+        self.out = out_queue
+        self.proc = None
+
+    def run(self):
+        cmd = ["journalctl", "-f", "-o", "json", "--no-pager"]
+        if self.cursor:
+            cmd += ["--after-cursor", self.cursor]
+        else:
+            cmd += ["-n", "0"]
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            self.out.put(("error", "journalctl not found (systemd only)"))
+            return
+        except OSError as exc:
+            self.out.put(("error", f"journalctl failed to start: {exc}"))
+            return
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            line = line.strip()
+            if line:
+                self.out.put(("line", line))
+        detail = ""
+        if self.proc.stderr is not None:
+            detail = (self.proc.stderr.read() or "").strip()
+        self.out.put(("error", detail or "journalctl exited"))
+
+    def stop(self):
+        if self.proc and self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+                self.proc.wait(timeout=3)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    self.proc.kill()
+                except OSError:
+                    pass
+
+
+class AuditTailer:
+    """Read new lines from the audit log and survive rotation."""
+
+    def __init__(self, path, offset=0, inode=0, lineno=0):
+        self.path = Path(path)
+        self.offset = int(offset or 0)
+        self.inode = int(inode or 0)
+        self.lineno = int(lineno or 0)
+
+    def seek_end(self):
+        """Start at the current end of the log (no backfill).
+
+        Used on the very first run so a fresh monitor does not raise alerts for
+        changes that happened before it was installed - the same rule the
+        journald follower uses with ``-n 0``.
+        """
+        if not self.path.is_file():
+            return False
+        try:
+            st = self.path.stat()
+            with self.path.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                self.offset = fh.tell()
+            self.inode = st.st_ino
+            self.lineno = _count_newlines(self.path)
+        except OSError:
+            return False
+        return True
+
+    def poll(self):
+        if not self.path.is_file():
+            return []
+        try:
+            st = self.path.stat()
+        except OSError:
+            return []
+        if self.inode and (st.st_ino != self.inode or st.st_size < self.offset):
+            self.offset = 0
+            self.lineno = 0
+        self.inode = st.st_ino
+        if st.st_size == self.offset:
+            return []
+        out = []
+        try:
+            with self.path.open("r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(self.offset)
+                while True:
+                    raw = fh.readline()
+                    if not raw:
+                        break
+                    if not raw.endswith("\n"):
+                        break  # partial line: wait for the writer to finish
+                    # readline() keeps tell() usable; iterating the file does not.
+                    self.offset = fh.tell()
+                    self.lineno += 1
+                    out.append((self.lineno, raw.rstrip("\n")))
+        except OSError:
+            return []
+        return out
+
+
+class AuditBuilder:
+    """Group consecutive audit records that share a serial number."""
+
+    def __init__(self, source_label):
+        self.source_label = source_label
+        self.serial = None
+        self.recs = []
+        self.started = 0.0
+        self.counters = Counter()
+
+    def add(self, lineno, raw):
+        rec = parse_audit_line(raw)
+        if rec is None:
+            self.counters["invalid"] += 1
+            return []
+        rec["lineno"] = lineno
+        rec["raw"] = raw
+        done = []
+        if self.serial is not None and rec["serial"] != self.serial:
+            done = self.flush()
+        self.serial = rec["serial"]
+        self.recs.append(rec)
+        self.started = time.monotonic()
+        return done
+
+    def flush(self):
+        if not self.recs:
+            return []
+        recs = self.recs
+        self.recs = []
+        self.serial = None
+        event = build_audit_event(recs, self.source_label)
+        primary = pick_primary(recs)
+        return [(event, primary["raw"])]
+
+    def tick(self, timeout=1.0):
+        if self.recs and time.monotonic() - self.started > timeout:
+            return self.flush()
+        return []
+
+
+class FollowEngine:
+    def __init__(self, rules_doc, sources, use_kimai=True):
+        self.rules = rules_doc["rules"]
+        self.sources = sources
+        self.use_kimai = use_kimai
+        self.ring = deque(load_events_tail(RING_SIZE), maxlen=RING_SIZE)
+        self.raw_map = load_raw_map()
+        self.state = load_state()
+        self.alerts = dict(self.state.get("alerts") or {})
+        self.cooldowns = {
+            r["name"]: int(
+                r.get("cooldown_seconds")
+                or r.get("window_seconds")
+                or DEFAULT_COOLDOWN
+            )
+            for r in self.rules
+        }
+        self.stop = threading.Event()
+        self.started_at = now_iso()
+        self.counters = Counter()
+        self.total_events = _count_lines(events_path())
+        self.total_findings = _count_lines(findings_log_path())
+        self.last_event_ts = self.ring[-1]["ts"] if self.ring else ""
+        self.kimai_state = None  # None = unknown, True/False = last result
+        self.kimai_detail = ""
+        self.journald_queue = queue.Queue()
+        self.journald = None
+        self.audit = None
+        self.audit_builder = AuditBuilder(AUDIT_LOG)
+        self.audit_readable = True
+        self.last_heartbeat = time.monotonic()
+        self.dirty_state = False
+        self.results = []
+        self._restore_offsets()
+
+    def _restore_offsets(self):
+        j = self.state.get("journald") or {}
+        a = self.state.get("audit") or {}
+        if "journald" in self.sources:
+            self.journald = JournaldFollower(
+                j.get("cursor", ""), self.journald_queue
+            )
+        if "auditd" in self.sources:
+            self.audit = AuditTailer(
+                AUDIT_LOG,
+                offset=a.get("offset", 0),
+                inode=a.get("inode", 0),
+                lineno=a.get("lineno", 0),
+            )
+            if not a and self.audit.seek_end():
+                self.state["audit"] = {
+                    "offset": self.audit.offset,
+                    "inode": self.audit.inode,
+                    "lineno": self.audit.lineno,
+                }
+                self.dirty_state = True
+                log(
+                    f"First run: starting at the end of {AUDIT_LOG} "
+                    "(history is not replayed)."
+                )
+
+    # -- event collection ---------------------------------------------------
+
+    def _drain_journald(self):
+        events, raw_pairs = [], []
+        while True:
+            try:
+                kind, payload = self.journald_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "error":
+                log(f"journald follower stopped: {payload}")
+                self.stop.set()
+                return events, raw_pairs
+            try:
+                rec = json.loads(payload)
+            except json.JSONDecodeError:
+                self.counters["invalid_journald"] += 1
+                continue
+            cursor = str(rec.get("__CURSOR", "") or "")
+            if not cursor:
+                cursor = "journalctl:seq=" + str(rec.get("__SEQNUM", "?"))
+            event, _reason = parse_journald_line(rec, cursor)
+            if event is None:
+                self.counters["invalid_journald"] += 1
+                continue
+            events.append(event)
+            raw_pairs.append((cursor, payload))
+            if cursor:
+                self.state.setdefault("journald", {})["cursor"] = cursor
+                self.dirty_state = True
+        return events, raw_pairs
+
+    def _drain_audit(self):
+        if self.audit is None:
+            return [], []
+        events, raw_pairs = [], []
+        try:
+            new_lines = self.audit.poll()
+        except OSError:
+            self.audit_readable = False
+            return [], []
+        for lineno, raw in new_lines:
+            for event, raw_line in self.audit_builder.add(lineno, raw):
+                events.append(event)
+                raw_pairs.append((event["raw_ref"], raw_line))
+        for event, raw_line in self.audit_builder.tick():
+            events.append(event)
+            raw_pairs.append((event["raw_ref"], raw_line))
+        if new_lines:
+            self.state["audit"] = {
+                "offset": self.audit.offset,
+                "inode": self.audit.inode,
+                "lineno": self.audit.lineno,
+            }
+            self.dirty_state = True
+        return events, raw_pairs
+
+    # -- findings -----------------------------------------------------------
+
+    def _prune_alerts(self):
+        if len(self.alerts) <= ALERT_STATE_LIMIT:
+            return
+        ordered = sorted(
+            self.alerts.items(),
+            key=lambda kv: kv[1].get("last_ts", ""),
+            reverse=True,
+        )
+        self.alerts = dict(ordered[:ALERT_STATE_LIMIT])
+
+    def _prune_raw_map(self):
+        """Keep evidence only for events still in the ring."""
+        live = {ev.get("raw_ref", "") for ev in self.ring}
+        self.raw_map = {k: v for k, v in self.raw_map.items() if k in live}
+
+    def _new_findings(self, flat):
+        now = time.time()
+        fresh = []
+        for f in flat:
+            key = f["rule"] + "|" + (f.get("key") or "")
+            prev = self.alerts.get(key)
+            cooldown = self.cooldowns.get(f["rule"], DEFAULT_COOLDOWN)
+            if prev is None:
+                fresh.append(f)
+            elif (
+                f["last_ts"] > prev.get("last_ts", "")
+                and now - float(prev.get("alerted_at", 0)) >= cooldown
+            ):
+                fresh.append(f)
+            if prev is None or f in fresh:
+                self.alerts[key] = {
+                    "alerted_at": now,
+                    "count": f["count"],
+                    "last_ts": f["last_ts"],
+                    "severity": f["severity"],
+                }
+                self.dirty_state = True
+        return fresh
+
+    def _emit(self, fresh):
+        if not fresh:
+            return
+        self.total_findings += len(fresh)
+        with findings_log_path().open("a", encoding="utf-8") as fh:
+            for f in fresh:
+                row = dict(f)
+                row["emitted_at"] = now_iso()
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        doc = {
+            "generated_at": now_iso(),
+            "since": None,
+            "event_count": len(self.ring),
+            "rules": self.results,
+            "findings": [f for f in self._flat_current()],
+        }
+        try:
+            atomic_write(
+                findings_path(), json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+            )
+        except OSError:
+            pass
+        for f in fresh:
+            log(
+                f"FINDING [{f['severity']}] {f['rule']} key={f['key'] or '(none)'} "
+                f"count={f['count']} :: {f['summary']}"
+            )
+            self.counters["findings"] += 1
+            if not self.use_kimai:
+                continue
+            ok, detail = kimai_emit(
+                kind=f["rule"],
+                severity=f["severity"],
+                summary=f["summary"],
+                data={
+                    "rule": f["rule"],
+                    "key": f["key"],
+                    "count": f["count"],
+                    "first_ts": f["first_ts"],
+                    "last_ts": f["last_ts"],
+                    "evidence": [
+                        {"raw_ref": e["raw_ref"], "line": e["line"][:300]}
+                        for e in f.get("evidence", [])[:3]
+                    ],
+                },
+            )
+            self.kimai_detail = detail
+            if ok:
+                if self.kimai_state is not True:
+                    log(f"KimAI accepted the event ({detail}); broker reachable again.")
+                self.kimai_state = True
+            else:
+                if self.kimai_state is not False:
+                    log(
+                        f"KimAI unavailable ({detail}); continuing in tools-only mode."
+                    )
+                self.kimai_state = False
+
+    def _flat_current(self):
+        flat = []
+        for r in self.results:
+            flat.extend(r.get("findings", []))
+        return flat
+
+    def _audit_readable_now(self):
+        """True when the audit log can actually be opened by this user.
+
+        ``is_file()`` is not enough: /var/log/audit is 0750, so a user who is
+        not in the log group sees EACCES on the directory, not on the file.
+        """
+        try:
+            with open(AUDIT_LOG, "rb"):
+                return True
+        except OSError:
+            return False
+
+    def _refresh_audit_state(self):
+        """Re-check readability so a permission fix or log rotation recovers.
+
+        Without this the pipeline would stay "unreadable" until a restart,
+        which is how a real deployment loses etc_watch silently.
+        """
+        if self.audit is None:
+            return
+        readable = self._audit_readable_now()
+        if readable == self.audit_readable:
+            return
+        self.audit_readable = readable
+        self.dirty_state = True
+        if readable:
+            log(f"audit log {AUDIT_LOG} is readable again; tailing it now.")
+        else:
+            log(
+                f"audit log {AUDIT_LOG} is no longer readable; "
+                "continuing with journald only (etc_watch not evaluable)."
+            )
+
+    # -- main loop ----------------------------------------------------------
+
+    def run(self):
+        if self.journald is not None:
+            self.journald.start()
+        log(
+            f"KimLogPipe {VERSION} following {', '.join(self.sources)} "
+            f"(store {data_dir()})"
+        )
+        log(
+            f"Loaded {len(self.ring)} recent event(s); "
+            f"{self.total_events} in store, {self.total_findings} finding(s) recorded."
+        )
+        if self.audit is not None and not self._audit_readable_now():
+            self.audit_readable = False
+            log(
+                f"audit log {AUDIT_LOG} is not readable; "
+                "continuing with journald only (tools-only for etc_watch)."
+            )
+
+        while not self.stop.is_set():
+            self._refresh_audit_state()
+            events, raw_pairs = self._drain_journald()
+            audit_events, audit_raw = self._drain_audit()
+            events.extend(audit_events)
+            raw_pairs.extend(audit_raw)
+
+            if events:
+                append_events(events, raw_pairs)
+                raw_lookup = dict(raw_pairs)
+                for ev in events:
+                    self.ring.append(ev)
+                    line = raw_lookup.get(ev["raw_ref"], "")
+                    if line:
+                        self.raw_map[ev["raw_ref"]] = line
+                self.total_events += len(events)
+                self.last_event_ts = events[-1]["ts"]
+
+            if events:
+                self.results, flat = evaluate(
+                    self.rules, list(self.ring), self.raw_map
+                )
+                fresh = self._new_findings(flat)
+                self._emit(fresh)
+
+            now_mono = time.monotonic()
+            if now_mono - self.last_heartbeat >= 60:
+                self.last_heartbeat = now_mono
+                kimai_label = (
+                    "ok"
+                    if self.kimai_state
+                    else ("down" if self.kimai_state is False else "untried")
+                )
+                log(
+                    f"heartbeat events={self.total_events} "
+                    f"findings={self.total_findings} queue={len(self.ring)} "
+                    f"kimai={kimai_label} audit="
+                    f"{'ok' if self.audit_readable else 'unreadable'}"
+                )
+                self._prune_alerts()
+                self._prune_raw_map()
+                self.dirty_state = True
+
+            if self.dirty_state:
+                self.state["alerts"] = self.alerts
+                self.state["stats"] = {
+                    "events": self.total_events,
+                    "findings": self.total_findings,
+                    "last_event_ts": self.last_event_ts,
+                    "kimai": self.kimai_state,
+                    "kimai_detail": self.kimai_detail,
+                    "audit_readable": self.audit_readable,
+                    "started_at": self.started_at,
+                    "sources": self.sources,
+                }
+                save_state(self.state)
+                self.dirty_state = False
+
+            time.sleep(min(FLUSH_SECONDS, 1.0))
+
+        return self.shutdown()
+
+    def shutdown(self):
+        log("Stopping KimLogPipe.")
+        if self.journald is not None:
+            self.journald.stop()
+        if self.audit is not None:
+            for event, raw_line in self.audit_builder.flush():
+                append_events([event], [(event["raw_ref"], raw_line)])
+            self.state["audit"] = {
+                "offset": self.audit.offset,
+                "inode": self.audit.inode,
+                "lineno": self.audit.lineno,
+            }
+        self.state["alerts"] = self.alerts
+        self.state["stats"] = {
+            "events": self.total_events,
+            "findings": self.total_findings,
+            "last_event_ts": self.last_event_ts,
+            "kimai": self.kimai_state,
+            "kimai_detail": self.kimai_detail,
+            "audit_readable": self.audit_readable,
+            "started_at": self.started_at,
+            "stopped_at": now_iso(),
+            "sources": self.sources,
+        }
+        save_state(self.state)
+        return 0
+
+
+def cmd_follow(args):
+    rules_doc = load_rules()
+    sources = ["journald", "auditd"] if args.source == "both" else [args.source]
+    use_kimai = not args.no_kimai and os.environ.get("KIMLOGPIPE_KIMAI", "1") != "0"
+    engine = FollowEngine(rules_doc, sources, use_kimai=use_kimai)
+
+    def _handle(_signum, _frame):
+        engine.stop.set()
+
+    signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
+    return engine.run()
+
+
+# ---------------------------------------------------------------------------
+# Status
+# ---------------------------------------------------------------------------
+
+
+def cmd_status(_args):
+    state = load_state()
+    stats = state.get("stats") or {}
+    log(f"KIMLOGPIPE v{VERSION} STATUS")
+    log("")
+    log(f"Store             : {data_dir()}")
+    log(f"Events in store   : {_count_lines(events_path())}")
+    log(f"Findings recorded : {_count_lines(findings_log_path())}")
+    if stats:
+        log(f"Last live run     : {stats.get('started_at', '?')}")
+        if stats.get("stopped_at"):
+            log(f"Stopped at        : {stats['stopped_at']}")
+        log(f"Live events       : {stats.get('events', 0)}")
+        log(f"Live findings     : {stats.get('findings', 0)}")
+        log(f"Last event        : {stats.get('last_event_ts') or '(none)'}")
+        kimai = stats.get("kimai")
+        kimai_label = "ok" if kimai else ("down" if kimai is False else "untried")
+        log(f"KimAI             : {kimai_label} {stats.get('kimai_detail', '')}".rstrip())
+        log(f"Audit log         : {'readable' if stats.get('audit_readable') else 'unreadable'}")
+        log(f"Sources           : {', '.join(stats.get('sources') or [])}")
+    else:
+        log("Last live run     : (no state.json; `kimlogpipe follow` has not run)")
+    path = kimai_socket_path()
+    log(f"KimAI socket      : {path} ({'present' if path.exists() else 'missing'})")
+    alerts = state.get("alerts") or {}
+    log(f"Alert cooldowns   : {len(alerts)} key(s)")
+    log(f"Last state update : {state.get('updated_at', '(never)')}")
 
 
 # ---------------------------------------------------------------------------
@@ -1332,32 +2178,48 @@ def cmd_rules(_args):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="kimlogpipe",
-        description="Normalisasi log sistem dan pengesanan berasaskan peraturan (v1).",
+        description="Normalize system logs and run threshold rules (v2).",
     )
     p.add_argument("--version", action="version", version=f"KimLogPipe {VERSION}")
     sub = p.add_subparsers(dest="command", required=True)
 
-    ing = sub.add_parser("ingest", help="serap log ke events.jsonl")
+    ing = sub.add_parser("ingest", help="ingest logs into events.jsonl (one-shot)")
     ing.add_argument("--source", required=True, choices=["journald", "auditd"])
-    ing.add_argument("--file", help="fail fixture; tanpa ini mod langsung digunakan")
+    ing.add_argument("--file", help="fixture file; without it the live snapshot is used")
     ing.set_defaults(func=cmd_ingest)
 
-    rl = sub.add_parser("rules", help="senaraikan peraturan dan ambang")
+    fol = sub.add_parser("follow", help="follow live logs and push findings to KimAI")
+    fol.add_argument(
+        "--source",
+        default="both",
+        choices=["both", "journald", "auditd"],
+        help="which sources to follow (default: both)",
+    )
+    fol.add_argument(
+        "--no-kimai",
+        action="store_true",
+        help="do not push findings to KimAI (tools-only)",
+    )
+    fol.set_defaults(func=cmd_follow)
+
+    rl = sub.add_parser("rules", help="list rules and thresholds")
     rl.set_defaults(func=cmd_rules)
 
-    det = sub.add_parser("detect", help="jalankan semua peraturan")
-    det.add_argument("--since", help="tetingkap masa, contoh 5m, 2h, 1d")
+    det = sub.add_parser("detect", help="run all rules over the store")
+    det.add_argument("--since", help="time window, e.g. 5m, 2h, 1d")
     det.set_defaults(func=cmd_detect)
 
-    rep = sub.add_parser("report", help="laporan manusia dalam Bahasa Melayu")
+    rep = sub.add_parser("report", help="human-readable report")
     rep.set_defaults(func=cmd_report)
+
+    st = sub.add_parser("status", help="show live state and store counters")
+    st.set_defaults(func=cmd_status)
     return p
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    args.func(args)
-    return 0
+    return args.func(args) or 0
 
 
 if __name__ == "__main__":
@@ -1366,5 +2228,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except KeyboardInterrupt:
-        print("\nDihentikan.", file=sys.stderr)
+        print("\nStopped.", file=sys.stderr, flush=True)
         sys.exit(130)
