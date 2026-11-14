@@ -24,6 +24,7 @@ ESP_LABEL="ESP"
 ROOT_LABEL="arch"
 ROOT_SUBVOL="@"
 HOME_SUBVOL="@home"
+SNAP_SUBVOL="@snapshots"
 MOUNT_OPTS="compress=zstd:3"
 MOUNTPOINT="/mnt"
 LOG="/var/log/install-arch.log"
@@ -36,16 +37,18 @@ DRY=0
 ASSUME_YES=0
 FORCE=0
 EFI=0
-ARSENAL=1
+LAB=0
+FLATPAK=0
 AI_PKGS=0
 
-BASE_PKGS=(base linux linux-firmware btrfs-progs networkmanager sudo neovim limine efibootmgr openssh)
+BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh)
 DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               kitty waybar wofi mako cliphist yazi playerctl
               xdg-desktop-portal-hyprland xdg-desktop-portal
               polkit pipewire pipewire-pulse wireplumber mesa
               swaybg ttf-jetbrains-mono-nerd)
-TOOL_PKGS=(git base-devel btop wl-clipboard grim slurp tcpdump nmap audit yara firefox gptfdisk iputils inetutils)
+TOOL_PKGS=(git btop wl-clipboard grim slurp tcpdump nmap audit firefox iputils inetutils
+           python curl unzip gitleaks trivy nikto ssh-audit)
 
 # ------------------------------------------------------------------ utilities
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
@@ -72,10 +75,16 @@ Usage: $(basename "$0") --disk /dev/XXX [options]
   --yes            do not ask for typed confirmation
   --force          allow a disk that already has NTFS partitions (Windows)
   --efi            VM: write a Limine NVRAM entry via efibootmgr
-  --no-arsenal     do not install the BlackArch tools + Security Gate
-  --ai             also install heavy AI security tools (garak, promptfoo…)
+  --lab            install the lab profile (BlackArch arsenal, analysis tools)
+  --flatpak        install flatpak + Flathub (runtime only, no apps);
+                   add apps later with kimrity-flatpak
+  --ai             also install heavy AI security tools (needs --lab)
   --dry-run        print commands only, no changes
   -h, --help
+
+Default = lean (package triage rule, 14 Nov): daily tools only + the
+Security Gate + kimscan. Analysis tools live in --lab, build tools are
+installed on demand, and Flatpak is opt-in.
 EOF
 }
 
@@ -90,8 +99,10 @@ while [ $# -gt 0 ]; do
     --yes)       ASSUME_YES=1; shift ;;
     --force)     FORCE=1; shift ;;
     --efi)       EFI=1; shift ;;
-    --no-arsenal) ARSENAL=0; shift ;;
-    --ai)        AI_PKGS=1; shift ;;
+    --lab)       LAB=1; shift ;;
+    --flatpak)   FLATPAK=1; shift ;;
+    --no-arsenal) warn "--no-arsenal is now the default (lab tools are opt-in via --lab)"; shift ;;
+    --ai)        AI_PKGS=1; LAB=1; shift ;;
     --dry-run)   DRY=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *) die "unknown argument: $1 (use --help)" ;;
@@ -176,7 +187,7 @@ EOF
 
 # -------------------------------------------------------------------- steps
 partition_disk() {
-  step "1/10 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
+  step "1/11 GPT partition: ${ESP_LABEL} 1 GiB + ${ROOT_LABEL} (rest)"
   run wipefs -a "$DISK"
   run sgdisk --zap-all "$DISK"
   run sgdisk -n "1:0:+1G" -t "1:ef00" -c "1:$ESP_LABEL" "$DISK"
@@ -197,14 +208,21 @@ partition_disk() {
 format_and_mount() {
   local root="${DISK}"; root="$(part 2)"; local esp; esp="$(part 1)"
 
-  step "2/10 Format: vfat (ESP) + btrfs ($ROOT_LABEL)"
+  step "2/11 Format: vfat (ESP) + btrfs ($ROOT_LABEL)"
   run mkfs.fat -F 32 -n "$ESP_LABEL" "$esp"
   run mkfs.btrfs -f -L "$ROOT_LABEL" "$root"
 
-  step "3/10 Subvolumes + mounts ($MOUNT_OPTS)"
+  # @snapshots lives at FS_TREE level (sibling of @), NOT nested under @.
+  # A rollback replaces @ (rename @ -> @.bak, new -> @); a sibling snapshot DB
+  # survives that untouched. Nested under @ it would move with the damaged
+  # system (the B0b lesson: mv across subvolumes fails with EXDEV).
+  # It is mounted only later — snapper's create-config needs /.snapshots to
+  # not exist yet as a mountpoint (ArchWiki: Snapper # Btrfs layout).
+  step "3/11 Subvolumes + mounts ($MOUNT_OPTS)"
   run mount "$root" "$MOUNTPOINT"
   run btrfs subvolume create "$MOUNTPOINT/$ROOT_SUBVOL"
   run btrfs subvolume create "$MOUNTPOINT/$HOME_SUBVOL"
+  run btrfs subvolume create "$MOUNTPOINT/$SNAP_SUBVOL"
   run umount "$MOUNTPOINT"
   run mount -o "$MOUNT_OPTS,subvol=$ROOT_SUBVOL" "$root" "$MOUNTPOINT"
   run mkdir -p "$MOUNTPOINT/home" "$MOUNTPOINT/boot"
@@ -213,7 +231,7 @@ format_and_mount() {
 }
 
 pacstrap_base() {
-  step "4/10 pacstrap base packages (${#BASE_PKGS[@]} packages)"
+  step "4/11 pacstrap base packages (${#BASE_PKGS[@]} packages)"
 
   # No -K here. `pacstrap -K` initialises an EMPTY keyring in the target and
   # implies -G (never copy the host keyring), so package signature checks fail
@@ -222,7 +240,7 @@ pacstrap_base() {
   # pacstrap copies that populated keyring into the new root.
   run pacstrap "$MOUNTPOINT" "${BASE_PKGS[@]}"
 
-  step "5/10 genfstab"
+  step "5/11 genfstab"
   if [ "$DRY" = 1 ]; then
     printf '[dry] genfstab -U %s >> %s/etc/fstab\n' "$MOUNTPOINT" "$MOUNTPOINT"
   else
@@ -234,7 +252,7 @@ pacstrap_base() {
 chroot_configure() {
   local cfile="$MOUNTPOINT/root/chroot-setup.sh"
 
-  step "6/10 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
+  step "6/11 Configuration inside the chroot (timezone, locale, hostname, initramfs, user, sudoers)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] write %s and run: arch-chroot %s bash /root/chroot-setup.sh\n' "$cfile" "$MOUNTPOINT"
@@ -280,7 +298,7 @@ bootloader_limine() {
   local root esp uuid
   root="$(part 2)"; esp="$(part 1)"
 
-  step "7/10 Limine (fallback path + limine.conf)"
+  step "7/11 Limine (fallback path + limine.conf)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] cp BOOTX64.EFI -> %s/boot/EFI/BOOT/ ; write limine.conf (UUID from blkid)\n' "$MOUNTPOINT"
@@ -314,7 +332,7 @@ CONF
 }
 
 install_dotfiles() {
-  step "8/10 Dotfiles -> /home/$USERNAME"
+  step "8/11 Dotfiles -> /home/$USERNAME"
   if [ ! -d "$DOTFILES_DIR" ]; then
     warn "dotfiles missing — skipped"; return 0
   fi
@@ -351,16 +369,142 @@ install_dotfiles() {
 }
 
 install_packages() {
-  step "9/10 Desktop packages (${#DESKTOP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
+  step "9/11 Desktop packages (${#DESKTOP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
   run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${DESKTOP_PKGS[@]}" "${TOOL_PKGS[@]}"
 }
 
-install_arsenal() {
-  step "10/10 BlackArch arsenal + Security Gate"
-  if [ "$ARSENAL" = 0 ]; then
-    info "arsenal skipped (--no-arsenal)"; return 0
+# -----------------------------------------------------------------------------
+# Snapshot stack (B0c) — lessons baked in from B0a/B0b (8 Nov, proven in QEMU):
+#
+#   * snapper + snap-pac are in BASE_PKGS: pacman transactions get pre/post
+#     snapshots automatically once the config exists. Hooks failing before
+#     that are non-fatal (verified: pacman keeps rc=0, "config does not exist").
+#   * create-config must run while /.snapshots does NOT exist as a mountpoint
+#     (ArchWiki notes it fails otherwise). It creates a nested .snapshots
+#     under @ — we delete it and mount the FS_TREE sibling @snapshots there.
+#   * fstab uses a subvol= path (not subvolid), so the snapshot DB mount
+#     survives renames of @ during a rollback. ID-anchored fstab (subvolid=<n>)
+#     is the fix for already-installed systems (B0b lesson).
+#   * Rolling back — the proven operator procedure (B0b):
+#       1) snapper --ambit classic rollback N   (the ambit is required)
+#       2) boot the RW clone: in limine.conf set
+#          rootflags=subvol=@/.snapshots/N/snapshot  (pick a menu entry if
+#          the system cannot boot at all)
+#       3) merge: btrfs snapshot of that clone to FS_TREE (@new), then rename
+#          inside FS_TREE (@ -> @.bak-damaged, @new -> @) and set the default
+#          subvolume. NEVER mv content across subvolumes — btrfs says EXDEV.
+#       4) with @snapshots as a sibling, no snapshot-DB transplant is needed.
+#   * systemd stub subvolumes (var/lib/portables, var/lib/machines) show up as
+#     empty stubs inside a snapshot — normal, nothing to do.
+# -----------------------------------------------------------------------------
+install_snapper_stack() {
+  step "10/11 Snapshot stack: snapper configs (root, home) + limits + timers"
+
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] chroot: snapper create-config / (root) + /home (home)\n'
+    printf '[dry] chroot: delete nested /.snapshots created by create-config\n'
+    printf '[dry] append fstab entry for %s + mount it + chmod 750\n' "$SNAP_SUBVOL"
+    printf '[dry] per-config limits (root: 5h/7d/2w/1m, home: 5h/7d/0w/10m) + number 50\n'
+    printf '[dry] enable snapper-timeline.timer snapper-cleanup.timer\n'
+    return 0
   fi
 
+  # --no-dbus works without a running dbus inside the chroot; retry without
+  # the flag as a safety net for older snapper builds.
+  _snapper_chroot() {
+    local cmd
+    if run arch-chroot "$MOUNTPOINT" snapper --no-dbus "$@"; then
+      return 0
+    fi
+    warn "snapper --no-dbus failed, retrying plain"
+    run arch-chroot "$MOUNTPOINT" snapper "$@"
+  }
+
+  _snapper_chroot -c root create-config /
+  _snapper_chroot -c home create-config /home
+
+  # Limits (mirrors the values proven in the QEMU guest, B0a)
+  _snapper_chroot -c root set-config \
+    NUMBER_LIMIT=50 NUMBER_LIMIT_IMPORTANT=10 \
+    TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 \
+    TIMELINE_LIMIT_WEEKLY=2 TIMELINE_LIMIT_MONTHLY=1 \
+    TIMELINE_LIMIT_QUARTERLY=0 TIMELINE_LIMIT_YEARLY=10
+  _snapper_chroot -c home set-config \
+    NUMBER_LIMIT=50 NUMBER_LIMIT_IMPORTANT=10 \
+    TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 \
+    TIMELINE_LIMIT_WEEKLY=0 TIMELINE_LIMIT_MONTHLY=10 \
+    TIMELINE_LIMIT_QUARTERLY=0 TIMELINE_LIMIT_YEARLY=10
+
+  # ArchWiki procedure: create-config made a NESTED /.snapshots under @;
+  # delete it, then mount the sibling @snapshots at the same path by fstab.
+  run btrfs subvolume delete "$MOUNTPOINT/.snapshots"
+
+  local uuid
+  uuid="$(blkid -s UUID -o value "$(part 2)")"
+
+  {
+    printf '\n# snapshot DB mount (B0c): sibling subvol, path-anchored so it\n'
+    printf '# survives renames of @ during rollback\n'
+    printf 'UUID=%s\t/.snapshots\tbtrfs\trw,relatime,%s,subvol=/%s\t0 0\n' \
+      "$uuid" "$MOUNT_OPTS" "$SNAP_SUBVOL"
+  } >> "$MOUNTPOINT/etc/fstab"
+  printf '+ fstab: /.snapshots -> %s (%s)\n' "$SNAP_SUBVOL" "$uuid"
+
+  run mount -o "$MOUNT_OPTS,subvol=$SNAP_SUBVOL" "$(part 2)" "$MOUNTPOINT/.snapshots"
+  run chmod 750 "$MOUNTPOINT/.snapshots"
+
+  run arch-chroot "$MOUNTPOINT" systemctl enable snapper-timeline.timer snapper-cleanup.timer
+
+  info "snapshot stack ready (@snapshots sibling, timers on)"
+}
+
+install_gate_tools() {
+  # ALWAYS installed — the 8 Nov lesson: the default build must carry the
+  # gate + kimscan + their engines (repo scans are the daily use case).
+  # Engines: gitleaks/trivy/nikto/ssh-audit come from TOOL_PKGS (pacman).
+  # semgrep is not in the Arch repos -> venv; nuclei -> pinned binary.
+  step "11/11 Security Gate + kimscan (always): engines + semgrep venv + nuclei"
+
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] gate.py + kimscan + en.yaml -> /usr/local/bin + /usr/local/share/kimscanning\n'
+    printf '[dry] python -m venv /opt/semgrep-venv + pip install semgrep + symlink /usr/local/bin/semgrep\n'
+    printf '[dry] nuclei pinned binary (v3.11.1) -> /usr/local/bin/nuclei (best effort)\n'
+    printf '[dry] gitleaks/trivy/nikto/ssh-audit arrive via TOOL_PKGS (step 9)\n'
+    return 0
+  fi
+
+  install -Dm755 "$SCRIPT_DIR/gate/gate.py" "$MOUNTPOINT/usr/local/bin/kimrity-gate"
+  install -Dm644 "$SCRIPT_DIR/gate/README.md" "$MOUNTPOINT/usr/share/doc/kimrity/gate.md"
+  # KimScanning engine: kimscan CLI reads rules/en.yaml (English, no AI).
+  install -Dm755 "$SCRIPT_DIR/kimscanning/kimscan" "$MOUNTPOINT/usr/local/bin/kimscan"
+  install -Dm644 "$SCRIPT_DIR/kimscanning/rules/en.yaml" "$MOUNTPOINT/usr/local/share/kimscanning/rules/en.yaml"
+
+  # semgrep: not packaged by Arch — venv keeps it away from system python.
+  # Proven working on Python 3.14 during the A4 test (8 Nov).
+  run arch-chroot "$MOUNTPOINT" python -m venv /opt/semgrep-venv
+  run arch-chroot "$MOUNTPOINT" /opt/semgrep-venv/bin/pip install --no-cache-dir semgrep
+  run arch-chroot "$MOUNTPOINT" ln -sf /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep
+
+  # nuclei: not packaged by Arch either — pinned release binary, best effort.
+  # Daily repo scans do not need it; web scans report the missing tool clearly.
+  if arch-chroot "$MOUNTPOINT" sh -c \
+      'curl -fsSL -o /tmp/nuclei.zip https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip'; then
+    arch-chroot "$MOUNTPOINT" sh -c 'unzip -o /tmp/nuclei.zip -d /usr/local/bin/ nuclei && chmod +x /usr/local/bin/nuclei && rm -f /tmp/nuclei.zip'
+    info "nuclei installed (pinned v3.11.1)"
+  else
+    warn "nuclei download failed — install it later (web scans will flag the missing tool)"
+  fi
+}
+
+install_lab() {
+  # Lab profile is OPT-IN (package triage rule, 14 Nov): analysis-only tools
+  # (metasploit, ghidra, burpsuite, autopsy, yara, ...) never ship by default.
+  if [ "$LAB" = 0 ]; then
+    info "lab profile skipped (default lean — enable with --lab)"
+    return 0
+  fi
+
+  step "Lab profile (--lab): BlackArch arsenal + optional AI tools"
   local list="$SCRIPT_DIR/tools/arsenal.list"
   local ai_list="$SCRIPT_DIR/tools/arsenal-ai.list"
   [ -f "$list" ] || { warn "tools/arsenal.list missing — skipped"; return 0; }
@@ -372,11 +516,9 @@ install_arsenal() {
   done < "$list"
 
   if [ "$DRY" = 1 ]; then
-    printf '[dry] setup-blackarch inside the chroot -> pacman -S %s core packages\n' "${#pkgs[@]}"
+    printf '[dry] setup-blackarch inside the chroot -> pacman -S %s lab packages\n' "${#pkgs[@]}"
     [ "$AI_PKGS" = 1 ] && printf '[dry] + blackarch-ai group (%s packages)\n' \
       "$(grep -vcE '^\s*(#|$)' "$ai_list" 2>/dev/null || echo '?')"
-    printf '[dry] gate.py -> /usr/local/bin/kimrity-gate\n'
-    printf '[dry] kimscan + en.yaml -> /usr/local/bin/kimscan + /usr/local/share/kimscanning/rules/\n'
     return 0
   fi
 
@@ -393,14 +535,26 @@ install_arsenal() {
     done < "$ai_list"
     run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${ai[@]}"
   fi
-
-  install -Dm755 "$SCRIPT_DIR/gate/gate.py" "$MOUNTPOINT/usr/local/bin/kimrity-gate"
-  install -Dm644 "$SCRIPT_DIR/gate/README.md" "$MOUNTPOINT/usr/share/doc/kimrity/gate.md"
-  # KimScanning engine: kimscan CLI reads rules/en.yaml (English, no AI).
-  install -Dm755 "$SCRIPT_DIR/kimscanning/kimscan" "$MOUNTPOINT/usr/local/bin/kimscan"
-  install -Dm644 "$SCRIPT_DIR/kimscanning/rules/en.yaml" "$MOUNTPOINT/usr/local/share/kimscanning/rules/en.yaml"
   rm -f "$MOUNTPOINT/root/setup-blackarch.sh"
-  info "arsenal (${#pkgs[@]} packages) + gate + kimscan installed"
+  info "lab (${#pkgs[@]} packages) installed"
+}
+
+install_flatpak_tools() {
+  # Flatpak is OPT-IN (decision 14 Nov): no runtime, no Flathub by default.
+  # The kimrity-flatpak helper (dotfiles/local-bin) adds apps on demand.
+  if [ "$FLATPAK" = 0 ]; then
+    info "flatpak skipped (opt-in: --flatpak, or later 'sudo pacman -S flatpak' + kimrity-flatpak add <app>')"
+    return 0
+  fi
+
+  step "Flatpak opt-in (--flatpak): runtime + Flathub, no apps"
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] pacman -S flatpak; flatpak remote-add flathub (apps later via kimrity-flatpak)\n'
+    return 0
+  fi
+  run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm flatpak
+  run arch-chroot "$MOUNTPOINT" flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+  info "flatpak ready — add apps with: kimrity-flatpak add com.discordapp.Discord md.obsidian.Obsidian"
 }
 
 finish() {
@@ -413,10 +567,15 @@ System installed to $DISK. What is LEFT (manual, on purpose):
        arch-chroot $MOUNTPOINT passwd
        arch-chroot $MOUNTPOINT passwd $USERNAME
 
-  2. Leave the ISO and boot from the disk:
+  2. Optional add-ons (opt-in, by design):
+       arch-chroot $MOUNTPOINT pacman -S base-devel        # build AUR packages
+       kimrity-flatpak add com.discordapp.Discord         # daily GUI apps
+       # lab tools: re-run install.sh with --lab (or install the packages now)
+
+  3. Leave the ISO and boot from the disk:
        umount -R $MOUNTPOINT && reboot
 
-  3. Log in as $USERNAME — Hyprland starts on its own.
+  4. Log in as $USERNAME — Hyprland starts on its own.
 EOF
 }
 
@@ -437,7 +596,10 @@ main() {
   bootloader_limine
   install_dotfiles
   install_packages
-  install_arsenal
+  install_snapper_stack
+  install_gate_tools
+  install_lab
+  install_flatpak_tools
   finish
 }
 

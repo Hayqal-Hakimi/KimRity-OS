@@ -1,0 +1,210 @@
+# KimScanning explanation dictionary (English, no AI).
+# Each entry maps tool + rule to what / why / fix.
+# All rule ids below are copied from real gitleaks, semgrep and trivy
+# output via gate/gate.py. Do not add invented ids.
+
+- tool: gitleaks
+  rule: aws-access-token
+  what: "An AWS access key was found in the project files."
+  why: "Anyone holding this key can access the AWS account, spend money, or delete cloud resources."
+  fix: "Remove the key from the code and git history, rotate it in AWS, and store secrets in a secrets manager."
+
+- tool: gitleaks
+  rule: github-pat
+  what: "A GitHub Personal Access Token was found in the project files."
+  why: "This token can grant access to repositories, organizations, or automation acting on behalf of its owner."
+  fix: "Revoke the token on GitHub, generate a new token with minimum scope, and store it only in environment variables or a secrets manager."
+
+- tool: gitleaks
+  rule: slack-legacy-bot-token
+  what: "A legacy Slack bot token was found in the project files."
+  why: "This token can be used to read messages, impersonate the bot, or abuse the Slack workspace."
+  fix: "Revoke the old token in Slack, generate a new one, and keep tokens outside the code repository."
+
+- tool: gitleaks
+  rule: stripe-access-token
+  what: "A Stripe key was found in the project files."
+  why: "This key can expose payment data or allow charges and fund transfers in the Stripe account."
+  fix: "Rotate the key in the Stripe dashboard, deactivate the old key, and use restricted keys through environment variables."
+
+- tool: semgrep
+  rule: python.lang.security.audit.subprocess-shell-true.subprocess-shell-true
+  what: "The code calls subprocess with shell=True."
+  why: "User input that reaches the shell command can cause command injection and arbitrary code execution."
+  fix: "Use an argument list without shell=True, or strictly validate and constrain the input before spawning the process."
+
+- tool: semgrep
+  rule: python.lang.security.deserialization.pickle.avoid-pickle
+  what: "The code uses pickle to deserialize data."
+  why: "Untrusted pickle data can execute arbitrary code when loaded."
+  fix: "Avoid pickle for external data; use a safe format such as JSON and validate the data schema."
+
+- tool: semgrep
+  rule: python.lang.security.audit.eval-detected.eval-detected
+  what: "The code uses eval() on data that may come from users."
+  why: "eval() can execute arbitrary Python expressions and open the way to system takeover."
+  fix: "Replace eval() with a parser or a whitelist mapping, and never evaluate user input."
+
+- tool: semgrep
+  rule: python.lang.security.audit.formatted-sql-query.formatted-sql-query
+  what: "A SQL query is built with string formatting."
+  why: "User input can alter the SQL structure and cause SQL injection, data leakage, or record deletion."
+  fix: "Use parameterized queries or an ORM with parameter binding instead of string formatting."
+
+- tool: semgrep
+  rule: python.sqlalchemy.security.sqlalchemy-execute-raw-query.sqlalchemy-execute-raw-query
+  what: "A raw SQL query is executed through SQLAlchemy with unbound input."
+  why: "User input can be injected into the SQL and read or change data without authorization."
+  fix: "Use bound parameters in SQLAlchemy text() or a safe ORM API."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value
+  what: "A pattern resembling an AWS Access Key ID was detected in the file."
+  why: "An exposed key ID can help an attacker identify and abuse the AWS account."
+  fix: "Remove the key value from the code, rotate the key, and use IAM roles or a secrets manager."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-github-token.detected-github-token
+  what: "A GitHub token pattern was detected in the file."
+  why: "An exposed token can grant access to GitHub code, issues, or automation."
+  fix: "Revoke the token on GitHub, create a new one with minimal permissions, and keep it outside the repository."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key
+  what: "A Stripe API key pattern was detected in the file."
+  why: "An exposed Stripe key can grant access to payment data and financial operations."
+  fix: "Rotate the Stripe key, deactivate the old one, and use secure secret storage."
+
+- tool: semgrep
+  rule: javascript.lang.security.detect-child-process.detect-child-process
+  what: "JavaScript code calls child_process to run system commands."
+  why: "If user input reaches the command, an attacker can execute system commands and take over the server."
+  fix: "Avoid the shell, use fixed argument lists, and validate all input before spawning processes."
+
+- tool: trivy
+  rule: CVE-2019-19844
+  what: "Django 3.0.0 is vulnerable to CVE-2019-19844 through crafted email address handling."
+  why: "An attacker can take over user accounts through the password reset flow."
+  fix: "Upgrade Django to a patched version and retest the password reset flow."
+
+- tool: trivy
+  rule: CVE-2020-7471
+  what: "Django 3.0.0 is vulnerable to CVE-2020-7471 through StringAgg with an untrusted delimiter."
+  why: "Crafted input can cause SQL injection and expose or modify data."
+  fix: "Upgrade Django to a patched version and keep the StringAgg delimiter away from user input."
+
+- tool: trivy
+  rule: CVE-2021-35042
+  what: "Django 3.0.0 is vulnerable to CVE-2021-35042 through unsanitized order_by input."
+  why: "An attacker can inject SQL through ordering parameters and read sensitive data."
+  fix: "Upgrade Django to a patched version and whitelist allowed order_by values."
+
+- tool: trivy
+  rule: CVE-2025-64459
+  what: "Django 3.0.0 is vulnerable to CVE-2025-64459, another SQL injection vulnerability."
+  why: "Crafted input can alter queries and expose or destroy application data."
+  fix: "Upgrade Django to the latest patched version and use parameterized queries."
+
+- tool: trivy
+  rule: CVE-2020-13254
+  what: "Django 3.0.0 is vulnerable to CVE-2020-13254 through malformed memcached keys."
+  why: "Cached data can leak or mix between users, causing information disclosure."
+  fix: "Upgrade Django to a patched version and review the memcached cache configuration."
+
+- tool: trivy
+  rule: CVE-2019-20477
+  what: "PyYAML 5.1 is vulnerable to CVE-2019-20477 through FullLoader loading."
+  why: "Untrusted YAML files can execute commands on the server."
+  fix: "Upgrade PyYAML and use safe_load() for all untrusted YAML data."
+
+- tool: trivy
+  rule: CVE-2020-14343
+  what: "PyYAML 5.1 is vulnerable to CVE-2020-14343 because an earlier security fix was incomplete."
+  why: "An attacker can still execute code through object construction in YAML."
+  fix: "Upgrade PyYAML to a patched version and avoid unsafe loaders."
+
+- tool: trivy
+  rule: CVE-2020-1747
+  what: "PyYAML 5.1 is vulnerable to CVE-2020-1747 through python/object/new in FullLoader."
+  why: "Crafted YAML can run arbitrary commands on the system."
+  fix: "Upgrade PyYAML and use safe_load() or a restricted loader."
+
+- tool: trivy
+  rule: CVE-2018-1000656
+  what: "Flask 0.12.2 is vulnerable to CVE-2018-1000656 through crafted JSON files."
+  why: "An attacker can cause excessive memory use or denial of service."
+  fix: "Upgrade Flask to a patched version and limit JSON payload sizes."
+
+- tool: trivy
+  rule: CVE-2018-18074
+  what: "requests 2.19.0 is vulnerable to CVE-2018-18074 during HTTPS-to-HTTP redirects."
+  why: "The Authorization header can be re-sent to an insecure host and leak credentials."
+  fix: "Upgrade requests to a patched version and avoid redirecting to HTTP."
+
+- tool: trivy
+  rule: CVE-2023-32681
+  what: "requests 2.19.0 is vulnerable to CVE-2023-32681 through a Proxy-Authorization header leak."
+  why: "Proxy credentials can leak to other hosts during redirects or chained requests."
+  fix: "Upgrade requests to a patched version and review the proxy configuration."
+
+- tool: trivy
+  rule: CVE-2023-30861
+  what: "Flask 0.12.2 is vulnerable to CVE-2023-30861 because the Vary: Cookie header is not sent."
+  why: "Persistent session cookies can be cached and exposed to other users through proxies or caches."
+  fix: "Upgrade Flask to a patched version and configure caching correctly."
+
+# --- Added 28 Oct after real tests: these ids appeared in real scans
+# without explanations. All copied from real output. ---
+
+- tool: gitleaks
+  rule: generic-api-key
+  what: "Text resembling an API key was found in the project files."
+  why: "If it is a real key, anyone who reads it can use the related service on your behalf."
+  fix: "Move secrets to environment variables or a secrets manager, rotate the key, and make sure secret files stay out of git."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-aws-secret-access-key.detected-aws-secret-access-key
+  what: "An AWS secret access key was found in the code."
+  why: "Combined with an Access Key ID, it grants full access to your AWS account."
+  fix: "Rotate the key in AWS immediately, remove it from the code and git history, and use IAM roles or environment variables."
+
+- tool: trivy
+  rule: aws-access-key-id
+  what: "An AWS Access Key ID was found in the file."
+  why: "This ID exposes your AWS account; together with the secret key it grants full access."
+  fix: "Deactivate the key in AWS, create a new one with minimum permissions, and keep it outside the repository."
+
+- tool: trivy
+  rule: aws-secret-access-key
+  what: "An AWS Secret Access Key was found in the file."
+  why: "This key is half of an AWS credential pair — it can be used to access your cloud resources."
+  fix: "Rotate the key in AWS, replace it with a reference to a secrets manager, and review CloudTrail logs for suspicious usage."
+
+# --- Added 29 Oct after a real server scan (ssh-audit) ---
+# These four ids are the labels emitted by gate/gate.py from real
+# ssh-audit output. No nmap ids were added because that scan produced
+# no nmap findings.
+
+- tool: ssh-audit
+  rule: ssh-fail
+  what: "ssh-audit marks an SSH configuration item as a hard failure (fail), usually an algorithm or setting that is already broken or outdated."
+  why: "Failing settings weaken SSH security and open the door to insecure connections or abuse."
+  fix: "Find the [fail] line in the ssh-audit output, disable that algorithm or setting in sshd_config, and retest the SSH service before use."
+
+- tool: ssh-audit
+  rule: ssh-warn
+  what: "ssh-audit marks an SSH configuration item as a warning (warn) — a setting that still works but should be improved."
+  why: "Warnings indicate choices weaker than recommended, which make attacks easier if left in place."
+  fix: "Review the [warn] lines in the ssh-audit output, prioritize modern recommended algorithms and settings, and test your SSH clients for compatibility."
+
+- tool: ssh-audit
+  rule: ssh-pq-advisory
+  what: "ssh-audit gives advisory-level feedback about post-quantum key exchange support on this SSH server."
+  why: "This is not an immediate break, but connections recorded today may be decrypted later by much more powerful computers."
+  fix: "Treat it as an early warning: update OpenSSH and consider post-quantum key exchange algorithms once your version supports them."
+
+- tool: ssh-audit
+  rule: ssh-curve-opinion
+  what: "ssh-audit expresses an opinion, not a failure, about curve and cryptographic algorithm preferences, including doubt about some NIST curves."
+  why: "It is not a proven weakness, but it suggests the algorithm choices may not match ssh-audit's view and deserve review."
+  fix: "Treat it as advice: review curve preferences in the SSH configuration and change them only if they stay compatible with all your clients."

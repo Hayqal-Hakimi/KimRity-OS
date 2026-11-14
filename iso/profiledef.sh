@@ -22,5 +22,8 @@ file_permissions=(
   ["/root/install.sh"]="0:0:755"
   ["/root/gate/gate.py"]="0:0:755"
   ["/root/tools/setup-blackarch.sh"]="0:0:755"
+  ["/root/kimscanning/kimscan"]="0:0:755"
+  ["/root/dotfiles/local-bin"]="0:0:755"
+  ["/root/dotfiles/local-bin/kimrity-flatpak"]="0:0:755"
   ["/usr/local/bin/kimscan"]="0:0:755"
 )

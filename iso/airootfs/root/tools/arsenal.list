@@ -1,15 +1,14 @@
-# KimRity arsenal — core packages (installed by install.sh, default)
-# The KimRity Gate needs: gitleaks, semgrep, trivy, nmap, nuclei, nikto, ssh-audit.
+# KimRity arsenal — LAB ONLY (install.sh --lab). Analysis tools only:
+# the daily gate engines (gitleaks/trivy/semgrep/nuclei/nikto/ssh-audit)
+# now ship in the DEFAULT build (package triage rule, 14 Nov).
 # Heavy/experimental AI tools are in arsenal-ai.list (optional: --ai).
 
 ## Recon & web
 amass
 masscan
-nuclei
 ffuf
 sqlmap
 theharvester
-nikto
 
 ## Exploitation & credentials
 metasploit
@@ -21,20 +20,14 @@ hashcat
 wireshark-qt
 bettercap
 ghidra
-radare2
 angr
 
-## Forensics & defense
+## Forensics & defence
 volatility3
 autopsy
 zeek
 suricata
+yara
 
 ## AI security (light)
 aimap
-
-## Security Gate support
-gitleaks
-trivy
-semgrep
-ssh-audit
