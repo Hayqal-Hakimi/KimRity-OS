@@ -95,6 +95,7 @@ bind("SUPER + SHIFT + V", "Toggle floating", hl.dsp.window.float({ action = "tog
 -- --- apps ---
 bind("SUPER + E", "File manager", "kitty yazi")
 bind("SUPER + B", "Browser", "firefox")
+bind("SUPER + C", "Calculator", "qalculate-gtk")
 bind("SUPER + N", "Editor", "kitty -e nvim")
 
 -- --- workspace presets (F1/F2/F3 macro via workspace-launch) ---

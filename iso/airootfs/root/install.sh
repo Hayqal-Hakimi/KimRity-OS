@@ -49,6 +49,12 @@ DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               swaybg ttf-jetbrains-mono-nerd)
 TOOL_PKGS=(git btop wl-clipboard grim slurp tcpdump nmap audit firefox iputils inetutils
            python curl unzip gitleaks trivy nikto perl-xml-writer ssh-audit)
+# Daily apps (B1) — every user touches these in a normal week:
+#   zathura+mupdf  keyboard-first PDF (no GTK4 stack), Vim keys
+#   qalculate-gtk  scientific calculator + unit/currency conversion (GTK3 already present)
+#   mpv            lean Wayland video player (pulls ffmpeg)
+#   telegram       daily messaging; in the repo, so pacman (not Flatpak)
+APP_PKGS=(zathura zathura-pdf-mupdf qalculate-gtk mpv telegram-desktop xdg-utils)
 
 # ------------------------------------------------------------------ utilities
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
@@ -369,8 +375,17 @@ install_dotfiles() {
 }
 
 install_packages() {
-  step "9/11 Desktop packages (${#DESKTOP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
-  run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${DESKTOP_PKGS[@]}" "${TOOL_PKGS[@]}"
+  step "9/11 Desktop (${#DESKTOP_PKGS[@]}) + daily apps (${#APP_PKGS[@]}) + base tools (${#TOOL_PKGS[@]})"
+  run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm \
+    "${DESKTOP_PKGS[@]}" "${APP_PKGS[@]}" "${TOOL_PKGS[@]}"
+  # Daily-app defaults (B1): PDF -> zathura, video -> mpv, web -> firefox.
+  # Written per user so file managers and xdg-open agree with the desktop.
+  run arch-chroot "$MOUNTPOINT" runuser -u "$USERNAME" -- \
+    env HOME="/home/$USERNAME" xdg-mime default org.pwmt.zathura.desktop application/pdf || true
+  run arch-chroot "$MOUNTPOINT" runuser -u "$USERNAME" -- \
+    env HOME="/home/$USERNAME" xdg-mime default mpv.desktop video/mp4 video/x-matroska video/webm || true
+  run arch-chroot "$MOUNTPOINT" runuser -u "$USERNAME" -- \
+    env HOME="/home/$USERNAME" xdg-settings set default-web-browser firefox.desktop || true
 }
 
 # -----------------------------------------------------------------------------

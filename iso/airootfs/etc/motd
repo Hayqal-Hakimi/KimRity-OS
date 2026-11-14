@@ -7,7 +7,7 @@
 
       bash /root/install.sh --disk /dev/vda --efi
 
-  Default = lean (daily tools + Security Gate + kimscan).
+  Default = lean (desktop + daily apps + Security Gate + kimscan).
   Optional, on purpose:
       --lab       analysis tools (metasploit, ghidra, ...)
       --flatpak   flatpak + Flathub runtime (apps later via kimrity-flatpak)
