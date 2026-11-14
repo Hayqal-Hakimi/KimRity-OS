@@ -37,7 +37,8 @@ DRY=0
 ASSUME_YES=0
 FORCE=0
 EFI=0
-ARSENAL=1
+LAB=0
+FLATPAK=0
 AI_PKGS=0
 
 BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh)
@@ -46,7 +47,8 @@ DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               xdg-desktop-portal-hyprland xdg-desktop-portal
               polkit pipewire pipewire-pulse wireplumber mesa
               swaybg ttf-jetbrains-mono-nerd)
-TOOL_PKGS=(git base-devel btop wl-clipboard grim slurp tcpdump nmap audit yara firefox gptfdisk iputils inetutils)
+TOOL_PKGS=(git btop wl-clipboard grim slurp tcpdump nmap audit firefox iputils inetutils
+           python curl unzip gitleaks trivy nikto ssh-audit)
 
 # ------------------------------------------------------------------ utilities
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
@@ -73,11 +75,16 @@ Usage: $(basename "$0") --disk /dev/XXX [options]
   --yes            do not ask for typed confirmation
   --force          allow a disk that already has NTFS partitions (Windows)
   --efi            VM: write a Limine NVRAM entry via efibootmgr
-  --no-arsenal     do not install the BlackArch tools (the Security Gate
-                   and kimscan are still installed)
-  --ai             also install heavy AI security tools (garak, promptfoo…)
+  --lab            install the lab profile (BlackArch arsenal, analysis tools)
+  --flatpak        install flatpak + Flathub (runtime only, no apps);
+                   add apps later with kimrity-flatpak
+  --ai             also install heavy AI security tools (needs --lab)
   --dry-run        print commands only, no changes
   -h, --help
+
+Default = lean (package triage rule, 14 Nov): daily tools only + the
+Security Gate + kimscan. Analysis tools live in --lab, build tools are
+installed on demand, and Flatpak is opt-in.
 EOF
 }
 
@@ -92,8 +99,10 @@ while [ $# -gt 0 ]; do
     --yes)       ASSUME_YES=1; shift ;;
     --force)     FORCE=1; shift ;;
     --efi)       EFI=1; shift ;;
-    --no-arsenal) ARSENAL=0; shift ;;
-    --ai)        AI_PKGS=1; shift ;;
+    --lab)       LAB=1; shift ;;
+    --flatpak)   FLATPAK=1; shift ;;
+    --no-arsenal) warn "--no-arsenal is now the default (lab tools are opt-in via --lab)"; shift ;;
+    --ai)        AI_PKGS=1; LAB=1; shift ;;
     --dry-run)   DRY=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *) die "unknown argument: $1 (use --help)" ;;
@@ -450,11 +459,17 @@ install_snapper_stack() {
 }
 
 install_gate_tools() {
-  # ALWAYS installed — the 8 Nov lesson from --no-arsenal: build 9 shipped
-  # without gate/kimscan, so the default build must carry them.
+  # ALWAYS installed — the 8 Nov lesson: the default build must carry the
+  # gate + kimscan + their engines (repo scans are the daily use case).
+  # Engines: gitleaks/trivy/nikto/ssh-audit come from TOOL_PKGS (pacman).
+  # semgrep is not in the Arch repos -> venv; nuclei -> pinned binary.
+  step "11/11 Security Gate + kimscan (always): engines + semgrep venv + nuclei"
+
   if [ "$DRY" = 1 ]; then
-    printf '[dry] gate.py -> /usr/local/bin/kimrity-gate (always, even --no-arsenal)\n'
-    printf '[dry] kimscan + en.yaml -> /usr/local/bin/kimscan + /usr/local/share/kimscanning/rules/\n'
+    printf '[dry] gate.py + kimscan + en.yaml -> /usr/local/bin + /usr/local/share/kimscanning\n'
+    printf '[dry] python -m venv /opt/semgrep-venv + pip install semgrep + symlink /usr/local/bin/semgrep\n'
+    printf '[dry] nuclei pinned binary (v3.11.1) -> /usr/local/bin/nuclei (best effort)\n'
+    printf '[dry] gitleaks/trivy/nikto/ssh-audit arrive via TOOL_PKGS (step 9)\n'
     return 0
   fi
 
@@ -463,47 +478,83 @@ install_gate_tools() {
   # KimScanning engine: kimscan CLI reads rules/en.yaml (English, no AI).
   install -Dm755 "$SCRIPT_DIR/kimscanning/kimscan" "$MOUNTPOINT/usr/local/bin/kimscan"
   install -Dm644 "$SCRIPT_DIR/kimscanning/rules/en.yaml" "$MOUNTPOINT/usr/local/share/kimscanning/rules/en.yaml"
+
+  # semgrep: not packaged by Arch — venv keeps it away from system python.
+  # Proven working on Python 3.14 during the A4 test (8 Nov).
+  run arch-chroot "$MOUNTPOINT" python -m venv /opt/semgrep-venv
+  run arch-chroot "$MOUNTPOINT" /opt/semgrep-venv/bin/pip install --no-cache-dir semgrep
+  run arch-chroot "$MOUNTPOINT" ln -sf /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep
+
+  # nuclei: not packaged by Arch either — pinned release binary, best effort.
+  # Daily repo scans do not need it; web scans report the missing tool clearly.
+  if arch-chroot "$MOUNTPOINT" sh -c \
+      'curl -fsSL -o /tmp/nuclei.zip https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip'; then
+    arch-chroot "$MOUNTPOINT" sh -c 'unzip -o /tmp/nuclei.zip -d /usr/local/bin/ nuclei && chmod +x /usr/local/bin/nuclei && rm -f /tmp/nuclei.zip'
+    info "nuclei installed (pinned v3.11.1)"
+  else
+    warn "nuclei download failed — install it later (web scans will flag the missing tool)"
+  fi
 }
 
-install_arsenal() {
-  step "11/11 BlackArch arsenal (optional) + Security Gate + kimscan (always)"
-  if [ "$ARSENAL" = 0 ]; then
-    info "BlackArch arsenal skipped (--no-arsenal)"
-  else
-    local list="$SCRIPT_DIR/tools/arsenal.list"
-    local ai_list="$SCRIPT_DIR/tools/arsenal-ai.list"
-    [ -f "$list" ] || { warn "tools/arsenal.list missing — skipped"; return 0; }
-
-    local pkgs=() line
-    while IFS= read -r line; do
-      case "$line" in ''|\#*) continue ;; esac
-      pkgs+=("$line")
-    done < "$list"
-
-    if [ "$DRY" = 1 ]; then
-      printf '[dry] setup-blackarch inside the chroot -> pacman -S %s core packages\n' "${#pkgs[@]}"
-      [ "$AI_PKGS" = 1 ] && printf '[dry] + blackarch-ai group (%s packages)\n' \
-        "$(grep -vcE '^\s*(#|$)' "$ai_list" 2>/dev/null || echo '?')"
-    else
-      install -Dm755 "$SCRIPT_DIR/tools/setup-blackarch.sh" "$MOUNTPOINT/root/setup-blackarch.sh"
-      run arch-chroot "$MOUNTPOINT" sh /root/setup-blackarch.sh
-
-      run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${pkgs[@]}"
-
-      if [ "$AI_PKGS" = 1 ] && [ -f "$ai_list" ]; then
-        local ai=() aline
-        while IFS= read -r aline; do
-          case "$aline" in ''|\#*) continue ;; esac
-          ai+=("$aline")
-        done < "$ai_list"
-        run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${ai[@]}"
-      fi
-      rm -f "$MOUNTPOINT/root/setup-blackarch.sh"
-    fi
-    info "arsenal (${#pkgs[@]} packages) done"
+install_lab() {
+  # Lab profile is OPT-IN (package triage rule, 14 Nov): analysis-only tools
+  # (metasploit, ghidra, burpsuite, autopsy, yara, ...) never ship by default.
+  if [ "$LAB" = 0 ]; then
+    info "lab profile skipped (default lean — enable with --lab)"
+    return 0
   fi
 
-  install_gate_tools
+  step "Lab profile (--lab): BlackArch arsenal + optional AI tools"
+  local list="$SCRIPT_DIR/tools/arsenal.list"
+  local ai_list="$SCRIPT_DIR/tools/arsenal-ai.list"
+  [ -f "$list" ] || { warn "tools/arsenal.list missing — skipped"; return 0; }
+
+  local pkgs=() line
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    pkgs+=("$line")
+  done < "$list"
+
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] setup-blackarch inside the chroot -> pacman -S %s lab packages\n' "${#pkgs[@]}"
+    [ "$AI_PKGS" = 1 ] && printf '[dry] + blackarch-ai group (%s packages)\n' \
+      "$(grep -vcE '^\s*(#|$)' "$ai_list" 2>/dev/null || echo '?')"
+    return 0
+  fi
+
+  install -Dm755 "$SCRIPT_DIR/tools/setup-blackarch.sh" "$MOUNTPOINT/root/setup-blackarch.sh"
+  run arch-chroot "$MOUNTPOINT" sh /root/setup-blackarch.sh
+
+  run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${pkgs[@]}"
+
+  if [ "$AI_PKGS" = 1 ] && [ -f "$ai_list" ]; then
+    local ai=() aline
+    while IFS= read -r aline; do
+      case "$aline" in ''|\#*) continue ;; esac
+      ai+=("$aline")
+    done < "$ai_list"
+    run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm "${ai[@]}"
+  fi
+  rm -f "$MOUNTPOINT/root/setup-blackarch.sh"
+  info "lab (${#pkgs[@]} packages) installed"
+}
+
+install_flatpak_tools() {
+  # Flatpak is OPT-IN (decision 14 Nov): no runtime, no Flathub by default.
+  # The kimrity-flatpak helper (dotfiles/local-bin) adds apps on demand.
+  if [ "$FLATPAK" = 0 ]; then
+    info "flatpak skipped (opt-in: --flatpak, or later 'sudo pacman -S flatpak' + kimrity-flatpak add <app>')"
+    return 0
+  fi
+
+  step "Flatpak opt-in (--flatpak): runtime + Flathub, no apps"
+  if [ "$DRY" = 1 ]; then
+    printf '[dry] pacman -S flatpak; flatpak remote-add flathub (apps later via kimrity-flatpak)\n'
+    return 0
+  fi
+  run arch-chroot "$MOUNTPOINT" pacman -S --needed --noconfirm flatpak
+  run arch-chroot "$MOUNTPOINT" flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+  info "flatpak ready — add apps with: kimrity-flatpak add com.discordapp.Discord md.obsidian.Obsidian"
 }
 
 finish() {
@@ -516,10 +567,15 @@ System installed to $DISK. What is LEFT (manual, on purpose):
        arch-chroot $MOUNTPOINT passwd
        arch-chroot $MOUNTPOINT passwd $USERNAME
 
-  2. Leave the ISO and boot from the disk:
+  2. Optional add-ons (opt-in, by design):
+       arch-chroot $MOUNTPOINT pacman -S base-devel        # build AUR packages
+       kimrity-flatpak add com.discordapp.Discord         # daily GUI apps
+       # lab tools: re-run install.sh with --lab (or install the packages now)
+
+  3. Leave the ISO and boot from the disk:
        umount -R $MOUNTPOINT && reboot
 
-  3. Log in as $USERNAME — Hyprland starts on its own.
+  4. Log in as $USERNAME — Hyprland starts on its own.
 EOF
 }
 
@@ -541,7 +597,9 @@ main() {
   install_dotfiles
   install_packages
   install_snapper_stack
-  install_arsenal
+  install_gate_tools
+  install_lab
+  install_flatpak_tools
   finish
 }
 

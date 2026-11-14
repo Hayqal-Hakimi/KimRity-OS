@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# kimrity-flatpak — manage the OPTIONAL Flatpak apps (opt-in by design).
+#
+# Build 10 ships WITHOUT flatpak (package triage rule, 14 Nov): daily GUI
+# apps stay on pacman and Flatpak exists only for the few apps that are
+# genuinely better as Flatpak. Approved slots (14 Nov): Discord, Obsidian.
+# WhatsApp stays as WhatsApp Web in the browser (no wrapper).
+#
+# Usage:
+#   kimrity-flatpak add com.discordapp.Discord
+#   kimrity-flatpak add md.obsidian.Obsidian
+#   kimrity-flatpak list
+#   kimrity-flatpak remove md.obsidian.Obsidian
+set -euo pipefail
+
+FLATHUB=flathub
+
+ensure_ready() {
+  if ! command -v flatpak >/dev/null 2>&1; then
+    echo "flatpak belum dipasang. Jalankan dulu:" >&2
+    echo "  sudo pacman -S flatpak" >&2
+    exit 1
+  fi
+  if ! flatpak remote-list --columns=name 2>/dev/null | grep -qx "$FLATHUB"; then
+    echo "+ flatpak remote-add $FLATHUB"
+    flatpak remote-add --if-not-exists "$FLATHUB" \
+      https://flathub.org/repo/flathub.flatpakrepo
+  fi
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  add)
+    shift
+    [ $# -ge 1 ] || { echo "usage: kimrity-flatpak add <app-id...>" >&2; exit 1; }
+    ensure_ready
+    ELEV=""
+    [ "$(id -u)" -ne 0 ] && ELEV="sudo"
+    $ELEV flatpak install -y "$FLATHUB" "$@"
+    ;;
+  remove)
+    shift
+    [ $# -ge 1 ] || { echo "usage: kimrity-flatpak remove <app-id...>" >&2; exit 1; }
+    ELEV=""
+    [ "$(id -u)" -ne 0 ] && ELEV="sudo"
+    $ELEV flatpak uninstall -y "$@"
+    ;;
+  list)
+    flatpak list --app --columns=application,size,origin 2>/dev/null || true
+    ;;
+  *)
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+esac
