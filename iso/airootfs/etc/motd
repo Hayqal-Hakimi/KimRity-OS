@@ -13,14 +13,19 @@
       --flatpak   flatpak + Flathub runtime (apps later via kimrity-flatpak)
 
   Contents of /root:
-      install.sh     installer (11 steps, with guards)
+      install.sh     installer (12 steps, with guards)
       dotfiles/      Hyprland, kitty, waybar, bash_profile
       hardening/     auditd rules, sysctl, sshd
       tools/         BlackArch arsenal lists + repo setup
       gate/          Security Gate CLI (scanner configs)
+      kimai/ kimlogpipe/  broker + live log pipeline (installed by step 12)
+      systemd/       user units + /etc audit watches
       kimscanning/   kimscan engine + en.yaml rules
       lab/           artifact #1 (SSH brute-force rule + report + evidence)
 
   Installed by install.sh into /usr/local/bin: kimrity-gate, kimscan.
 
   After installing: set your own passwords, then reboot.
+
+  After install: `kimscan posture` checks the machine itself
+  (SUPER + SHIFT + K on the desktop).

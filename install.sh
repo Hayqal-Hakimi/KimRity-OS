@@ -5,7 +5,7 @@
 # Run from an Arch ISO (or any Arch system with arch-install-scripts)
 # as root. It DESTROYS the given disk — no default target.
 #
-#   ./install.sh --disk /dev/vda --hostname arch-uji --user hayqal
+#   ./install.sh --disk /dev/vda --hostname kimrity --user hayqal
 #   ./install.sh --disk /dev/vda --dry-run        # print only, no changes
 #
 # After it finishes: `passwd` (root) and `passwd <user>` — passwords are NEVER
@@ -14,7 +14,7 @@
 set -Eeuo pipefail
 
 # ----------------------------------------------------------------- defaults
-HOSTNAME="arch-uji"
+HOSTNAME="kimrity"
 USERNAME="hayqal"
 USER_UID=1000
 TIMEZONE="Asia/Kuala_Lumpur"
@@ -41,7 +41,7 @@ LAB=0
 FLATPAK=0
 AI_PKGS=0
 
-BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh)
+BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh zram-generator)
 DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               kitty waybar wofi mako libnotify cliphist yazi playerctl
               xdg-desktop-portal-hyprland xdg-desktop-portal
@@ -283,6 +283,26 @@ systemctl enable NetworkManager
 systemctl enable sshd
 systemctl enable auditd
 
+# zram: compressed swap in RAM instead of a swap partition. On the 1.7 GB test
+# VM and the 7.2 GB host this keeps the desktop alive without touching the disk.
+# min(ram/2, 4096) means a big machine does not lose half its memory to swap.
+cat > /etc/systemd/zram-generator.conf <<'ZRAM'
+[zram0]
+zram-size = min(ram / 2, 4096)
+compression-algorithm = zstd
+ZRAM
+
+# Autologin on tty1 only: Hyprland starts from ~/.bash_profile, the same model
+# Omarchy uses on this hardware. SSH is unaffected. A greeter can replace this
+# once the disk is encrypted; until then a login prompt would suggest a
+# protection the unencrypted disk does not provide.
+install -d -m 755 /etc/systemd/system/getty@tty1.service.d
+cat > /etc/systemd/system/getty@tty1.service.d/autologin.conf <<CONF
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --noclear --autologin $USERNAME %I
+CONF
+
 # Persistent logs (artifact finding #1: journald is not persistent by default)
 mkdir -p /var/log/journal
 
@@ -342,6 +362,21 @@ timeout: 2
     cmdline: root=UUID=$uuid rw rootflags=subvol=$ROOT_SUBVOL
     module_path: boot():/initramfs-linux.img
 CONF
+
+  # Dual-boot: if this ESP already holds Windows, put it in the menu once.
+  # boot() is the partition Limine was loaded from, i.e. this same ESP, and it
+  # survives a UUID change (limine-entry-tool writes an absolute uuid(...)).
+  if [ -f "$MOUNTPOINT/boot/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
+    cat >> "$MOUNTPOINT/boot/EFI/BOOT/limine.conf" <<'WINCONF'
+
+/Windows Boot Manager
+    protocol: efi
+    path: boot():/EFI/Microsoft/Boot/bootmgfw.efi
+WINCONF
+    info "Windows found on this ESP: added to the Limine menu"
+  else
+    info "no Windows on this ESP: single-boot menu"
+  fi
 
   info "root UUID: $uuid"
 
