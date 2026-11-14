@@ -208,3 +208,53 @@
   what: "ssh-audit expresses an opinion, not a failure, about curve and cryptographic algorithm preferences, including doubt about some NIST curves."
   why: "It is not a proven weakness, but it suggests the algorithm choices may not match ssh-audit's view and deserve review."
   fix: "Treat it as advice: review curve preferences in the SSH configuration and change them only if they stay compatible with all your clients."
+
+# --- added 14 Nov (Build 10): real ids from gitleaks 8.x, semgrep 1.185 and
+# --- trivy 0.76 that were missing from the first 33 entries.
+- tool: gitleaks
+  rule: private-key
+  what: "A private key (for example an RSA, EC or OpenSSH key) was found in the project files."
+  why: "Anyone with the private key can impersonate the server or user it belongs to, decrypt captured traffic, or sign artifacts as if they were the owner."
+  fix: "Treat the key as compromised, remove it from code and git history, generate a new key pair, and keep private keys outside repositories with strict file permissions."
+
+- tool: gitleaks
+  rule: slack-bot-token
+  what: "A Slack bot token was found in the project files."
+  why: "A bot token lets the holder read messages, post as the bot and reach any workspace data the bot can access."
+  fix: "Revoke the token in the Slack app settings, install a new token with the minimum scopes, and load it from an environment variable or secrets manager."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-private-key.detected-private-key
+  what: "Semgrep matched a private key block (for example an RSA or EC private key) inside the scanned files."
+  why: "Private key material in a repository allows impersonation of the key owner and decryption of traffic recorded earlier."
+  fix: "Remove the key from the code and history, rotate it, and store private keys in a protected location outside the repository."
+
+- tool: semgrep
+  rule: generic.secrets.security.detected-slack-token.detected-slack-token
+  what: "Semgrep matched a Slack token pattern inside the scanned files."
+  why: "A leaked Slack token gives access to workspace messages or to actions performed by the app that owns the token."
+  fix: "Revoke the token in Slack, issue a new one with minimal scopes, and keep it in an environment variable or secrets manager."
+
+- tool: trivy
+  rule: github-pat
+  what: "Trivy's secret scanner found a GitHub Personal Access Token in the project files."
+  why: "The token can read or write repositories, act on behalf of its owner, and reach any organisation the owner belongs to."
+  fix: "Revoke the token on GitHub, create a replacement with the narrowest scopes, and inject it at runtime instead of committing it."
+
+- tool: trivy
+  rule: private-key
+  what: "Trivy's secret scanner found private key material in the project files."
+  why: "A private key in a repository can be copied by anyone who reads the code and used to impersonate its owner."
+  fix: "Rotate the key, purge it from history, and keep private keys in a permission-restricted path outside the repository."
+
+- tool: trivy
+  rule: slack-access-token
+  what: "Trivy's secret scanner found a Slack access token in the project files."
+  why: "The token allows posting, reading messages, or reaching workspace data depending on its scopes."
+  fix: "Revoke it in Slack, create a narrow-scope replacement, and load it from an environment variable or secrets manager."
+
+- tool: trivy
+  rule: stripe-secret-token
+  what: "Trivy's secret scanner found a Stripe secret key in the project files."
+  why: "A live Stripe secret key can create charges, issue refunds and read customer payment data."
+  fix: "Roll the key in the Stripe dashboard, switch to restricted keys where possible, and keep secrets out of the repository."

@@ -48,7 +48,7 @@ DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               polkit pipewire pipewire-pulse wireplumber mesa
               swaybg ttf-jetbrains-mono-nerd)
 TOOL_PKGS=(git btop wl-clipboard grim slurp tcpdump nmap audit firefox iputils inetutils
-           python curl unzip gitleaks trivy nikto ssh-audit)
+           python curl unzip gitleaks trivy nikto perl-xml-writer ssh-audit)
 
 # ------------------------------------------------------------------ utilities
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
@@ -312,7 +312,7 @@ bootloader_limine() {
   cp "$MOUNTPOINT/usr/share/limine/BOOTX64.EFI" "$MOUNTPOINT/boot/EFI/BOOT/"
 
   cat > "$MOUNTPOINT/boot/EFI/BOOT/limine.conf" <<CONF
-timeout: 5
+timeout: 2
 
 /Arch Linux
     protocol: linux
@@ -437,7 +437,10 @@ install_snapper_stack() {
 
   # ArchWiki procedure: create-config made a NESTED /.snapshots under @;
   # delete it, then mount the sibling @snapshots at the same path by fstab.
+  # Deleting the subvolume removes its directory entry too -> recreate the
+  # mountpoint before mounting (found in the build-10 fresh install, 14 Nov).
   run btrfs subvolume delete "$MOUNTPOINT/.snapshots"
+  run mkdir -p "$MOUNTPOINT/.snapshots"
 
   local uuid
   uuid="$(blkid -s UUID -o value "$(part 2)")"
@@ -487,10 +490,18 @@ install_gate_tools() {
 
   # nuclei: not packaged by Arch either — pinned release binary, best effort.
   # Daily repo scans do not need it; web scans report the missing tool clearly.
+  # NOTE: arch-chroot mounts a FRESH tmpfs on /tmp per invocation (build-10
+  # lesson, 14 Nov), so the archive must live in /var/tmp to survive the
+  # curl -> unzip handoff.
   if arch-chroot "$MOUNTPOINT" sh -c \
-      'curl -fsSL -o /tmp/nuclei.zip https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip'; then
-    arch-chroot "$MOUNTPOINT" sh -c 'unzip -o /tmp/nuclei.zip -d /usr/local/bin/ nuclei && chmod +x /usr/local/bin/nuclei && rm -f /tmp/nuclei.zip'
-    info "nuclei installed (pinned v3.11.1)"
+      'curl -fsSL --retry 4 --retry-delay 3 --retry-all-errors -o /var/tmp/nuclei.zip https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip'; then
+    if arch-chroot "$MOUNTPOINT" sh -c 'unzip -o /var/tmp/nuclei.zip -d /usr/local/bin/ nuclei'; then
+      arch-chroot "$MOUNTPOINT" chmod +x /usr/local/bin/nuclei || true
+      info "nuclei installed (pinned v3.11.1)"
+    else
+      warn "nuclei archive could not be unpacked — install it later (web scans flag it)"
+    fi
+    arch-chroot "$MOUNTPOINT" rm -f /var/tmp/nuclei.zip || true
   else
     warn "nuclei download failed — install it later (web scans will flag the missing tool)"
   fi
@@ -558,6 +569,13 @@ install_flatpak_tools() {
 }
 
 finish() {
+  # Keep the installed footprint inside the 1B budget (<=5 GB): pacman's
+  # package cache is ~1.2 GB after a full install and is not needed at runtime.
+  # NOTE: `pacman -Scc --noconfirm` answers the DEFAULT (N) to "remove ALL
+  # files from cache?" and cleans nothing (build-10 lesson, 14 Nov) -> feed y.
+  step "Cleanup: pacman cache (keeps the installed footprint lean)"
+  run arch-chroot "$MOUNTPOINT" sh -c 'yes | pacman -Scc'
+
   step "Done"
   cat <<EOF
 
