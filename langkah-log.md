@@ -266,6 +266,9 @@ dalam ISO (`iso/airootfs/root/tools/`) jadi satu revisi di belakang repo; `iso/a
 disegerak semula selepas itu, jadi `sync-iso.sh --check` bersih. Ini **tidak** menjejaskan sistem yang
 dipasang: `verify-installed.sh`/`qemu-install-test.sh` tidak dipasang ke cakera — ia dijalankan dari
 hos melalui SSH/monitor. Build 15 (rebuild akan datang) akan membawa salinan yang sama.
+`verify-iso.sh` tidak membandingkan alat harness (ia menyemak payload yang **dipasang**), jadi ISO
+11.17 masih **19/19** selepas sync — dijalankan semula pada 22:56 untuk memastikan itu, bukan
+menganggapnya.
 
 **Pemerhatian pertama-log-masuk:** selepas install, skrin desktop ditutup oleh tetingkap Hyprland
 sendiri (`class: hyprland-donate-screen`, tajuk "Hyprland Updated") — notis sekali-per-versi daripada
