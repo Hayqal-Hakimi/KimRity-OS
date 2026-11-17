@@ -10,6 +10,12 @@
 -- Java/Swing apps (ghidra, burp) need X11 + avoid reparenting under XWayland.
 hl.env("_JAVA_AWT_WM_NONREPARENTING", "1")
 hl.env("DISPLAY", ":0")
+-- No manual `dbus-update-activation-environment` needed: Hyprland imports
+-- WAYLAND_DISPLAY / XDG_CURRENT_DESKTOP / HYPRLAND_INSTANCE_SIGNATURE into the
+-- systemd user manager and D-Bus itself on startup (verified against the
+-- 0.56.2 binary: it runs `systemctl --user import-environment` then
+-- `dbus-update-activation-environment --systemd ...`). Portals therefore work
+-- without a wrapper — do not re-add this as an exec-once.
 
 -- -------------------------------------------------------------------- input
 hl.config({
@@ -88,7 +94,10 @@ end
 -- --- core ---
 bind("SUPER + RETURN", "Terminal", "kitty")
 bind("SUPER + D", "Menu", "~/.local/bin/menu-toggle")
-bind("SUPER + Q", "Close window", hl.dsp.window.close())
+-- Close window: SUPER+W, matching Omarchy and every app's "close" convention.
+-- SUPER+Q is deliberately left unbound: in GUIs it means "quit", and while
+-- KimRity runs in a VM the host would otherwise swallow it (15 Nov decision).
+bind("SUPER + W", "Close window", hl.dsp.window.close())
 bind("SUPER + SHIFT + E", "Exit Hyprland", "hyprctl dispatch exit")
 bind("SUPER + SHIFT + V", "Toggle floating", hl.dsp.window.float({ action = "toggle" }))
 
@@ -125,7 +134,7 @@ bind(
   "Move to scratchpad",
   hl.dsp.window.move({ workspace = "special:magic", follow = false })
 )
-bind("SUPER + L", "Lock screen", "hyprlock")
+bind("SUPER + L", "Lock screen", "~/.local/bin/lock")
 bind("SUPER + SHIFT + Q", "Power menu", "~/.local/bin/powermenu")
 bind("PRINT", "Screenshot (fullscreen)", "~/.local/bin/screenshot full")
 bind("SUPER + SHIFT + S", "Screenshot (region)", "~/.local/bin/screenshot region")

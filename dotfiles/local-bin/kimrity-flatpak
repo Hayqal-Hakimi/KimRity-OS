@@ -17,7 +17,7 @@ FLATHUB=flathub
 
 ensure_ready() {
   if ! command -v flatpak >/dev/null 2>&1; then
-    echo "flatpak belum dipasang. Jalankan dulu:" >&2
+    echo "flatpak is not installed. Run this first:" >&2
     echo "  sudo pacman -S flatpak" >&2
     exit 1
   fi
@@ -46,9 +46,12 @@ case "$cmd" in
     $ELEV flatpak uninstall -y "$@"
     ;;
   list)
+    # Silent "" output looked like an empty app list: say flatpak is missing.
+    command -v flatpak >/dev/null 2>&1 || { echo "flatpak is not installed (sudo pacman -S flatpak)" >&2; exit 1; }
     flatpak list --app --columns=application,size,origin 2>/dev/null || true
     ;;
   *)
-    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+    # Print the header comment block only; the old fixed range also printed `set -euo pipefail`.
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
     ;;
 esac

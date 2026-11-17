@@ -50,10 +50,12 @@ sub_style() {
 sub_setup() {
   sel=$(printf '%s\n' "    Hyprland" "    Waybar" "    Kitty" "    Neovim" "$BACK" | pick "Setup")
   case "${sel:-}" in
-    *Hyprland*)  exec kitty -e nvim "$HOME/.config/hypr/hyprland.conf" ;;
+    # hyprland.lua is the shipped Hyprland config; hyprland.conf does not exist.
+    *Hyprland*)  exec kitty -e nvim "$HOME/.config/hypr/hyprland.lua" ;;
     *Waybar*)    exec kitty -e nvim "$HOME/.config/waybar/config.jsonc" ;;
     *Kitty*)     exec kitty -e nvim "$HOME/.config/kitty/kitty.conf" ;;
-    *Neovim*)    exec kitty -e nvim "$HOME/.config/nvim/init.lua" ;;
+    # No nvim config ships, so the folder may be missing: create it or :w fails (E212).
+    *Neovim*)    exec kitty -e sh -c 'mkdir -p "$HOME/.config/nvim" && exec nvim "$HOME/.config/nvim/init.lua"' ;;
     *Back*)      main_menu ;;
   esac
 }

@@ -12,20 +12,39 @@ iso/
 └── airootfs/
     ├── etc/os-release     NAME="KimRity", ID=kimrity
     ├── etc/motd
-    └── root/              carried into the live ISO:
-        ├── install.sh     installer (10 steps, includes the arsenal)
-        ├── dotfiles/      Hyprland, waybar, kitty
-        ├── hardening/     audit rules, sysctl, sshd
-        ├── lab/           artifact rule + reports
+    └── root/              carried into the live ISO (written by tools/sync-iso.sh):
+        ├── install.sh     the installer (12 steps)
+        ├── dotfiles/      Hyprland (Lua), waybar, kitty, wofi, quickshell, local-bin
+        ├── hardening/     audit rules, sysctl, sshd (installed by step 12)
         ├── gate/          Security Gate (gate.py + README)
-        └── tools/         arsenal.list, arsenal-ai.list, setup-blackarch.sh
+        ├── kimai/         approval broker (user unit)
+        ├── kimlogpipe/    journald + auditd pipeline (user unit)
+        ├── kimscanning/   posture / baseline / report engine + rules
+        ├── systemd/       user units + audit rules
+        ├── tools/         arsenal lists, sync-iso, verify-iso, build-iso
+        └── lab/           lab artifact rule + reports (opt-in)
 ```
 
 ## Build
 
+Never build from a stale profile. The supported way is one command:
+
 ```sh
-mkarchiso -v -w /var/tmp/kimrity-work -o ~/iso ~/kimrity-profile
+./tools/build-iso.sh            # sync -> mkarchiso -> verify-iso.sh
+./tools/build-iso.sh --no-verify
 ```
+
+What it wraps (same as the manual form, both need root for mkarchiso):
+
+```sh
+./tools/sync-iso.sh             # repo -> iso/airootfs; --check reports drift
+sudo mkarchiso -v -w /var/tmp/kimrity-work -o iso-out ./iso
+./tools/verify-iso.sh iso-out/kimrity-YYYY.MM.DD-x86_64.iso
+```
+
+`sync-iso.sh` exists because the ISO profile holds **copies**: on 14 Nov a stale
+`kimscanning/rules/en.yaml` (33 entries instead of 41) shipped inside a fresh
+ISO, and only `verify-iso.sh` caught it.
 
 ## Things that are REQUIRED (without them, mkarchiso fails)
 
@@ -42,10 +61,18 @@ mkarchiso -v -w /var/tmp/kimrity-work -o ~/iso ~/kimrity-profile
    (Verified 30 Oct, archiso 91: the build passed although
    `/etc/shadow` and `/etc/gshadow` are absent from the profile —
    they are created by the `filesystem` package during pacstrap.)
+4. **`-cdrom` when testing in QEMU** — attaching the ISO as `usb-storage`
+   gives `Write Protected` and the firmware falls through to PXE (14 Nov).
 
 ## Inside the ISO (live)
 
-`install.sh` can be run directly from the live environment. Step 10/10
-adds the BlackArch repo (key + mirrorlist) and installs `tools/arsenal.list`
-(24 core packages) + `gate.py` → `/usr/local/bin/kimrity-gate`.
-`--ai` adds `tools/arsenal-ai.list` (heavy: garak 6.4 GB, promptfoo 1.7 GB).
+`install.sh` runs directly from the live environment:
+
+```sh
+KIMRITY_PIP_FIND_LINKS=http://10.0.2.2:8000 \
+  bash /root/install.sh --disk /dev/vda --yes --efi
+```
+
+Lab tooling is **opt-in**: `--lab` adds the BlackArch repo (key + mirrorlist)
+and installs `tools/arsenal.list`; `--flatpak` adds the Flatpak slots. The
+default install is the lean daily system — see the repo `README.md`.

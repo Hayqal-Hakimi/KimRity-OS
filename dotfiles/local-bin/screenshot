@@ -1,9 +1,22 @@
 #!/bin/sh
 # Screenshot: full (default) or region. Save + copy to clipboard.
 set -u
-dir="$HOME/Pictures"
+# grim is the only capture tool here: without it the keybind would do nothing.
+command -v grim >/dev/null 2>&1 || {
+    notify-send "KimRity" "grim is not installed - no screenshot" 2>/dev/null
+    exit 1
+}
+# KIMRITY_SHOT_DIR: screenshots go to one folder; a non-English desktop or a
+# different naming convention can point elsewhere without editing this script.
+dir="${KIMRITY_SHOT_DIR:-$HOME/Pictures}"
 mkdir -p "$dir"
 f="$dir/$(date +%Y%m%d-%H%M%S).png"
+# PRINT can fire twice within one second: never overwrite the earlier shot.
+n=1
+while [ -e "$f" ]; do
+  f="$dir/$(date +%Y%m%d-%H%M%S)-$n.png"
+  n=$((n + 1))
+done
 
 case "${1:-full}" in
   region)

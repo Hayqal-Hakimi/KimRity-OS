@@ -25,7 +25,10 @@ ROOT_LABEL="arch"
 ROOT_SUBVOL="@"
 HOME_SUBVOL="@home"
 SNAP_SUBVOL="@snapshots"
-MOUNT_OPTS="compress=zstd:3"
+# noatime: btrfs + snapper touch the tree constantly; atime updates are pure
+# write amplification and nothing on this box reads atime. It is part of the
+# mount string on purpose — genfstab records the live options, so fstab gets it.
+MOUNT_OPTS="compress=zstd:3,noatime"
 MOUNTPOINT="/mnt"
 LOG="/var/log/install-arch.log"
 
@@ -40,13 +43,17 @@ EFI=0
 LAB=0
 FLATPAK=0
 AI_PKGS=0
+NO_PASSWORD=0
 
 BASE_PKGS=(base linux linux-firmware btrfs-progs snapper snap-pac networkmanager sudo neovim limine efibootmgr openssh zram-generator)
 DESKTOP_PKGS=(hyprland hypridle hyprlock hyprpolkitagent quickshell
               kitty waybar wofi mako libnotify cliphist yazi playerctl
               xdg-desktop-portal-hyprland xdg-desktop-portal
+              xdg-desktop-portal-gtk    # file dialogs (Firefox upload, yazi)
               polkit pipewire pipewire-pulse wireplumber mesa
-              swaybg ttf-jetbrains-mono-nerd)
+              pavucontrol               # audio mixer for pipewire-pulse
+              swaybg ttf-jetbrains-mono-nerd
+              noto-fonts-emoji)         # no tofu in Firefox/Telegram
 TOOL_PKGS=(git btop wl-clipboard grim slurp tcpdump nmap audit firefox iputils inetutils
            python curl unzip gitleaks trivy nikto perl-xml-writer ssh-audit)
 # Daily apps (B1) — every user touches these in a normal week:
@@ -58,13 +65,94 @@ APP_PKGS=(zathura zathura-pdf-mupdf qalculate-gtk mpv telegram-desktop xdg-utils
 
 # ------------------------------------------------------------------ utilities
 c_red=$'\033[31m'; c_grn=$'\033[32m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
-step() { printf '\n%s==> %s%s\n' "$c_grn" "$*" "$c_off"; }
+
+# Origin of the current step, for the failure pointer (see on_error below).
+CUR_STEP_NUM=""
+CUR_STEP_NAME="setup (before the first step)"
+# Last command handed to run(), so the pointer can name it: a failure inside
+# run() reports "$@" otherwise, which tells the operator nothing.
+LAST_CMD=""
+
+step() {
+  # Remember where we are: "11/12 Foo: bar" -> number 11, name "Foo: bar".
+  case "${1:-}" in
+    [0-9]*/[0-9]*) CUR_STEP_NUM="${1%%/*}"; CUR_STEP_NAME="${*#* }" ;;
+    *)             CUR_STEP_NUM="";        CUR_STEP_NAME="${*:-setup}" ;;
+  esac
+  printf '\n%s==> %s%s\n' "$c_grn" "$*" "$c_off"
+}
 info() { printf '    %s\n' "$*"; }
 warn() { printf '%s[!] %s%s\n' "$c_yel" "$*" "$c_off"; }
 die()  { printf '%s[x] %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
 
+# Failure pointer (daily-use fix, 15 Nov): a real install takes ~10 minutes, so
+# a fatal command must TELL you where it died instead of just stopping. Prints
+# the step, the exact command and the log path, then keeps the exit code.
+# 16 Nov: every known step also prints the arch-chroot line that repeats it, so
+# the operator does not have to reinvent the recovery from scratch.
+retry_hint() {
+  local m="$MOUNTPOINT" efiflag=""
+  if [ "$EFI" = 1 ]; then efiflag=" --efi"; fi
+  case "${CUR_STEP_NUM:-}" in
+    1|2|3)
+      printf '    retry: the disk is half-written — start over from the live ISO:\n'
+      printf '           bash /root/install.sh --disk %s --yes%s\n' "$DISK" "$efiflag"
+      ;;
+    4)  printf '    retry: pacstrap %s %s\n' "$m" "${BASE_PKGS[*]}" ;;
+    5)  printf '    retry: genfstab -U %s >> %s/etc/fstab\n' "$m" "$m" ;;
+    6)  printf '    retry: arch-chroot %s bash /root/chroot-setup.sh   (kept on failure, safe to re-run)\n' "$m"
+        printf '           user only?  arch-chroot %s id -u %s || arch-chroot %s useradd -m -u %s -G wheel -s /bin/bash %s\n' \
+          "$m" "$USERNAME" "$m" "$USER_UID" "$USERNAME" ;;
+    7)  printf "    retry: arch-chroot %s bash -c 'mkinitcpio -P && ls -l /boot/EFI/BOOT/'   (BOOTX64.EFI + limine.conf)\n" "$m"
+        if [ "$EFI" = 1 ]; then
+          printf '           arch-chroot %s efibootmgr --create --disk %s --part 1 --label Limine --loader "\\EFI\\BOOT\\BOOTX64.EFI" --unicode\n' "$m" "$DISK"
+        fi ;;
+    8)  printf '    retry: arch-chroot %s chown -R %s:%s /home/%s\n' "$m" "$USER_UID" "$USER_UID" "$USERNAME" ;;
+    9)  printf '    retry: repeat the step-9 command printed above (pacman skips what is already installed)\n' ;;
+    10) printf '    retry: arch-chroot %s snapper --no-dbus -c root create-config /\n' "$m"
+        printf '           arch-chroot %s systemctl enable snapper-timeline.timer snapper-cleanup.timer\n' "$m" ;;
+    11) printf '    retry: arch-chroot %s /opt/semgrep-venv/bin/pip install --no-cache-dir semgrep\n' "$m" ;;
+    12) printf "    retry: arch-chroot %s sh -c 'ln -sfn /usr/lib/systemd/user/kimai.service /etc/systemd/user/default.target.wants/kimai.service'\n" "$m"
+        printf '           arch-chroot %s systemctl enable auditd\n' "$m" ;;
+    *)  printf '    retry: fix the failed command and run it again; for a boot problem see README §9\n' ;;
+  esac
+}
+
+on_error() {
+  local rc="$1" cmd="$2"
+  trap - ERR
+  # A failure inside run() reports the forwarder, not the command it forwarded.
+  if [ "$cmd" = '"$@"' ] && [ -n "$LAST_CMD" ]; then cmd="$LAST_CMD"; fi
+  if [ -n "$CUR_STEP_NUM" ]; then
+    printf '%s[x] step %s/12 (%s) failed at: %s%s\n' \
+      "$c_red" "$CUR_STEP_NUM" "$CUR_STEP_NAME" "$cmd" "$c_off" >&2
+  else
+    printf '%s[x] step %s failed at: %s%s\n' \
+      "$c_red" "$CUR_STEP_NAME" "$cmd" "$c_off" >&2
+  fi
+  retry_hint >&2
+  if [ -f "$LOG" ]; then
+    printf '    log: %s\n' "$LOG" >&2
+  fi
+  exit "$rc"
+}
+trap 'on_error "$?" "$BASH_COMMAND"' ERR
+
+# pip drops a plain-HTTP --find-links host unless it is trusted explicitly
+# (first real install, 16 Nov: http://10.0.2.2:8000 was ignored with "not a
+# trusted or secure host", then "No matching distribution found for semgrep").
+# Returns the host to trust — scheme, path and port stripped — or nothing.
+find_links_trusted_host() {
+  local v="${1:-}"
+  case "$v" in
+    http://*) v="${v#http://}"; v="${v%%/*}"; printf '%s' "${v%%:*}" ;;
+    *) ;;
+  esac
+}
+
 run() {
   printf '+ %s\n' "$*"
+  LAST_CMD="$*"
   [ "$DRY" = 1 ] && return 0
   "$@"
 }
@@ -77,8 +165,12 @@ Usage: $(basename "$0") --disk /dev/XXX [options]
   --hostname NAME  default: $HOSTNAME
   --user NAME      default: $USERNAME (UID 1000, group wheel)
   --timezone TZ    default: $TIMEZONE
+  --locale LOCALE  default: $LOCALE (system language, /etc/locale.conf)
+  --keymap KM      default: $KEYMAP (console keyboard, /etc/vconsole.conf)
   --dotfiles DIR   default: $DOTFILES_DIR
   --yes            do not ask for typed confirmation
+  --no-password    do not prompt for passwords at the end (sudo and the
+                   hyprlock lock screen stay unusable until you run passwd)
   --force          allow a disk that already has NTFS partitions (Windows)
   --efi            VM: write a Limine NVRAM entry via efibootmgr
   --lab            install the lab profile (BlackArch arsenal, analysis tools)
@@ -101,8 +193,11 @@ while [ $# -gt 0 ]; do
     --hostname)  HOSTNAME="${2:-}"; shift 2 ;;
     --user)      USERNAME="${2:-}"; shift 2 ;;
     --timezone)  TIMEZONE="${2:-}"; shift 2 ;;
+    --locale)    LOCALE="${2:-}"; shift 2 ;;
+    --keymap)    KEYMAP="${2:-}"; shift 2 ;;
     --dotfiles)  DOTFILES_DIR="${2:-}"; shift 2 ;;
     --yes)       ASSUME_YES=1; shift ;;
+    --no-password) NO_PASSWORD=1; shift ;;
     --force)     FORCE=1; shift ;;
     --efi)       EFI=1; shift ;;
     --lab)       LAB=1; shift ;;
@@ -123,42 +218,72 @@ part() {
   esac
 }
 
-need_cmd() { command -v "$1" >/dev/null 2>&1 || die "tool missing: $1"; }
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 && return 0
+  # --dry-run only prints, so a host without the Arch tools (sgdisk, mkfs.*,
+  # arch-chroot) is still an honest dry run, not a failure.
+  [ "${DRY:-0}" = 1 ] && { warn "tool missing: $1 (ignored for --dry-run)"; return 0; }
+  die "tool missing: $1"
+}
 
 # ----------------------------------------------------------------- preflight
 preflight() {
   step "Preflight"
 
-  [ "$(id -u)" -eq 0 ] || die "must run as root"
+  # --disk is checked BEFORE root: "you forgot the disk" is the useful message,
+  # and it must be the same one whether or not the caller is root.
   [ -n "$DISK" ] || die "--disk is REQUIRED (no default value — it erases a disk)"
 
-  [ -b "$DISK" ] || die "$DISK is not a block device"
-  [ -d "/sys/block/$(basename "$DISK")" ] || die "$DISK is not a whole disk (do not pass a partition)"
+  # --dry-run writes nothing, so it may be run by a normal user on a host that
+  # does not have the target device. Real runs keep every guard untouched.
+  if [ "$DRY" = 1 ]; then
+    [ "$(id -u)" -eq 0 ] || info "not root — fine for --dry-run (nothing is written)"
+  else
+    [ "$(id -u)" -eq 0 ] || die "must run as root"
+  fi
 
-  info "target disk : $DISK ($(lsblk -dno SIZE "$DISK" | tr -d ' '))"
+  local have_disk=0
+  [ -b "$DISK" ] && have_disk=1
+  if [ "$have_disk" = 0 ]; then
+    if [ "$DRY" = 1 ]; then
+      warn "$DISK is not a block device on this host — --dry-run: device checks skipped, commands printed only"
+    else
+      die "$DISK is not a block device"
+    fi
+  fi
+
+  local size="?"
+  [ "$have_disk" = 1 ] && size="$(lsblk -dno SIZE "$DISK" | tr -d ' ')"
+  info "target disk : $DISK ($size)"
   info "hostname    : $HOSTNAME"
   info "user        : $USERNAME (UID $USER_UID)"
   info "timezone    : $TIMEZONE"
   info "dotfiles    : $DOTFILES_DIR"
 
-  # Avoid wiping the disk that is currently holding the ISO
-  local iso_src iso_parent
-  iso_src="$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)"
-  if [ -n "$iso_src" ]; then
-    iso_parent="$(lsblk -no PKNAME "$iso_src" 2>/dev/null | head -1 || true)"
-    [ "$iso_parent" = "$(basename "$DISK")" ] && \
-      die "this disk holds the running ISO — pick another disk"
-  fi
+  if [ "$have_disk" = 1 ]; then
+    [ -d "/sys/block/$(basename "$DISK")" ] || die "$DISK is not a whole disk (do not pass a partition)"
 
-  # Avoid wiping Windows (project rule: sda must never be touched)
-  if lsblk -no FSTYPE "$DISK" 2>/dev/null | grep -qx 'ntfs'; then
-    [ "$FORCE" = 1 ] || die "this disk contains NTFS (Windows). Use --force only if you are absolutely sure"
-    warn "disk has NTFS — continuing because of --force"
-  fi
+    # Avoid wiping the disk that is currently holding the ISO
+    local iso_src iso_parent
+    iso_src="$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null || true)"
+    if [ -n "$iso_src" ]; then
+      iso_parent="$(lsblk -no PKNAME "$iso_src" 2>/dev/null | head -1 || true)"
+      [ "$iso_parent" = "$(basename "$DISK")" ] && \
+        die "this disk holds the running ISO — pick another disk"
+    fi
 
-  # Do not touch a disk whose partitions are still mounted
-  if lsblk -no MOUNTPOINT "$DISK" 2>/dev/null | grep -qv '^$'; then
-    die "a partition on $DISK is still mounted — unmount it first"
+    # Avoid wiping Windows (project rule: sda must never be touched)
+    if lsblk -no FSTYPE "$DISK" 2>/dev/null | grep -qx 'ntfs'; then
+      [ "$FORCE" = 1 ] || die "this disk contains NTFS (Windows). Use --force only if you are absolutely sure"
+      warn "disk has NTFS — continuing because of --force"
+    fi
+
+    # Do not touch a disk whose partitions are still mounted
+    if lsblk -no MOUNTPOINT "$DISK" 2>/dev/null | grep -qv '^$'; then
+      die "a partition on $DISK is still mounted — unmount it first"
+    fi
+  else
+    info "[dry] ISO / NTFS / mounted-partition guards are not evaluated (device absent)"
   fi
 
   if [ ! -d /sys/firmware/efi ]; then
@@ -166,8 +291,10 @@ preflight() {
   fi
 
   local size_gib
-  size_gib=$(lsblk -bdno SIZE "$DISK" | awk '{printf "%d", $1/1024/1024/1024}')
-  [ "$size_gib" -ge 20 ] || die "disk is too small (${size_gib} GiB) — needs ≥ 20 GiB"
+  if [ "$have_disk" = 1 ]; then
+    size_gib=$(lsblk -bdno SIZE "$DISK" | awk '{printf "%d", $1/1024/1024/1024}')
+    [ "$size_gib" -ge 20 ] || die "disk is too small (${size_gib} GiB) — needs ≥ 20 GiB"
+  fi
 
   local c
   for c in sgdisk mkfs.fat mkfs.btrfs pacstrap arch-chroot genfstab blkid; do
@@ -252,6 +379,21 @@ pacstrap_base() {
   else
     genfstab -U "$MOUNTPOINT" >> "$MOUNTPOINT/etc/fstab"
     printf '+ genfstab -U %s >> %s/etc/fstab\n' "$MOUNTPOINT" "$MOUNTPOINT"
+
+    # fstab sanity check: a missing /, /home or /boot line only becomes visible
+    # as an unbootable disk after the reboot, when the mounts above are gone.
+    # Fail here instead, while every mount is still live and fixable.
+    local t
+    for t in / /home /boot; do
+      awk -v t="$t" '$2 == t { f = 1 } END { exit !f }' "$MOUNTPOINT/etc/fstab" \
+        || die "fstab has no entry for '$t' — do NOT reboot; check the step-3 mounts"
+    done
+    # genfstab keeps subvol= and drops subvolid= for btrfs (verified), which is
+    # what makes a snapper rollback of @ survivable. Warn if that ever changes.
+    if ! awk '$2 == "/" { n = split($4, o, ","); for (i = 1; i <= n; i++) if (o[i] == "subvol=/@") got = 1 }
+              END { exit !got }' "$MOUNTPOINT/etc/fstab"; then
+      warn "fstab root line has no subvol=/@ — boot may use the FS top level; fix before reboot"
+    fi
   fi
 }
 
@@ -279,9 +421,14 @@ printf 'KEYMAP=%s\n' "$KEYMAP" > /etc/vconsole.conf
 printf '%s\n' "$HOSTNAME" > /etc/hostname
 
 mkinitcpio -P
+
+# Units that must come up on the first boot. auditd is enabled in step 12, after
+# the audit package exists (step 9): `systemctl enable auditd` here fails with
+# "Unit file auditd.service does not exist" and aborts the whole installation.
 systemctl enable NetworkManager
 systemctl enable sshd
-systemctl enable auditd
+systemctl enable fstrim.timer        # weekly TRIM — keeps SSD/NVMe write speed
+systemctl enable systemd-timesyncd   # NTP: correct clock before TLS after boot
 
 # zram: compressed swap in RAM instead of a swap partition. On the 1.7 GB test
 # VM and the 7.2 GB host this keeps the desktop alive without touching the disk.
@@ -310,8 +457,9 @@ id -u "$USERNAME" >/dev/null 2>&1 || \
   useradd -m -u $USER_UID -G wheel -s /bin/bash "$USERNAME"
 
 # KimLogPipe runs as a user service and needs to read journald and the audit
-# log. systemd-journal already exists on Arch; auditd is told to use that group
-# below so /var/log/audit/audit.log becomes group-readable.
+# log. systemd-journal already exists on Arch, so the user is added to it here;
+# auditd is pointed at the same group in step 12 (auditd.conf does not exist
+# yet — the audit package arrives in step 9).
 getent group systemd-journal >/dev/null 2>&1 || groupadd -r systemd-journal
 usermod -aG systemd-journal "$USERNAME"
 
@@ -319,11 +467,6 @@ usermod -aG systemd-journal "$USERNAME"
 # model from 26 Oct). enable-linger only writes this marker file.
 mkdir -p /var/lib/systemd/linger
 touch "/var/lib/systemd/linger/$USERNAME"
-
-# The user service reads the audit trail; keep the default root:root 0600 off.
-if [ -f /etc/audit/auditd.conf ]; then
-  sed -i 's/^log_group =.*/log_group = systemd-journal/' /etc/audit/auditd.conf
-fi
 
 printf '%%wheel ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/10-wheel
 chmod 440 /etc/sudoers.d/10-wheel
@@ -350,8 +493,14 @@ bootloader_limine() {
   uuid="$(blkid -s UUID -o value "$root")"
   [ -n "$uuid" ] || die "could not get the UUID for $root"
 
+  # Name the failure: on a run without --efi this fallback binary is the ONLY
+  # way into the system, so a raw `cp: cannot stat` would be the last thing a
+  # 10-minute install says before it stops.
+  local efi_src="$MOUNTPOINT/usr/share/limine/BOOTX64.EFI"
+  [ -f "$efi_src" ] || die "limine EFI binary missing: ${efi_src#"$MOUNTPOINT"} — reinstall it with: arch-chroot $MOUNTPOINT pacman -S limine"
+
   mkdir -p "$MOUNTPOINT/boot/EFI/BOOT"
-  cp "$MOUNTPOINT/usr/share/limine/BOOTX64.EFI" "$MOUNTPOINT/boot/EFI/BOOT/"
+  cp "$efi_src" "$MOUNTPOINT/boot/EFI/BOOT/"
 
   cat > "$MOUNTPOINT/boot/EFI/BOOT/limine.conf" <<CONF
 timeout: 2
@@ -514,7 +663,7 @@ install_snapper_stack() {
   {
     printf '\n# snapshot DB mount (B0c): sibling subvol, path-anchored so it\n'
     printf '# survives renames of @ during rollback\n'
-    printf 'UUID=%s\t/.snapshots\tbtrfs\trw,relatime,%s,subvol=/%s\t0 0\n' \
+    printf 'UUID=%s\t/.snapshots\tbtrfs\trw,%s,subvol=/%s\t0 0\n' \
       "$uuid" "$MOUNT_OPTS" "$SNAP_SUBVOL"
   } >> "$MOUNTPOINT/etc/fstab"
   printf '+ fstab: /.snapshots -> %s (%s)\n' "$SNAP_SUBVOL" "$uuid"
@@ -534,9 +683,23 @@ install_gate_tools() {
   # semgrep is not in the Arch repos -> venv; nuclei -> pinned binary.
   step "11/12 Security Gate + kimscan (always): engines + semgrep venv + nuclei"
 
+  # pip args are built before the dry-run return so --dry-run shows the command
+  # the real run uses, --trusted-host included.
+  local pip_args=(--no-cache-dir --retries 2 --timeout 30 --disable-pip-version-check)
+  local find_links="${KIMRITY_PIP_FIND_LINKS:-}" trust_host=""
+  if [ -n "$find_links" ]; then
+    trust_host="$(find_links_trusted_host "$find_links")"
+    pip_args+=(--no-index --find-links "$find_links")
+    if [ -n "$trust_host" ]; then pip_args+=(--trusted-host "$trust_host"); fi
+  fi
+
   if [ "$DRY" = 1 ]; then
     printf '[dry] gate.py + kimscan + en.yaml -> /usr/local/bin + /usr/local/share/kimscanning\n'
-    printf '[dry] python -m venv /opt/semgrep-venv + pip install semgrep + symlink /usr/local/bin/semgrep\n'
+    printf '[dry] python -m venv /opt/semgrep-venv + pip install semgrep (fail-soft: warn, install continues)\n'
+    if [ -n "$find_links" ]; then
+      printf '[dry] pip --no-index --find-links %s%s (local wheelhouse only)\n' \
+        "$find_links" "${trust_host:+ --trusted-host $trust_host}"
+    fi
     printf '[dry] nuclei pinned binary (v3.11.1) -> /usr/local/bin/nuclei (best effort)\n'
     printf '[dry] gitleaks/trivy/nikto/ssh-audit arrive via TOOL_PKGS (step 9)\n'
     return 0
@@ -552,9 +715,30 @@ install_gate_tools() {
 
   # semgrep: not packaged by Arch — venv keeps it away from system python.
   # Proven working on Python 3.14 during the A4 test (8 Nov).
-  run arch-chroot "$MOUNTPOINT" python -m venv /opt/semgrep-venv
-  run arch-chroot "$MOUNTPOINT" /opt/semgrep-venv/bin/pip install --no-cache-dir semgrep
-  run arch-chroot "$MOUNTPOINT" ln -sf /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep
+  # FAIL-SOFT (15 Nov, daily-use fix): semgrep is a ~72 MB wheel, and one stalled
+  # download used to abort the whole install at step 11/12. It now warns and the
+  # install finishes; kimrity-gate reports the missing engine, and the fix is the
+  # single rerun printed below. Short timeouts mean a dead mirror fails fast.
+  # KIMRITY_PIP_FIND_LINKS=<dir|http://host:port> installs from a local wheelhouse
+  # (offline/fast test): KIMRITY_PIP_FIND_LINKS=http://10.0.2.2:8000 ./install.sh ...
+  # An http:// wheelhouse also gets --trusted-host <host> (see the helper above).
+  if [ -n "$find_links" ]; then
+    info "semgrep: pip wheelhouse only -> $find_links${trust_host:+ (trusted-host $trust_host)}"
+  fi
+
+  if run arch-chroot "$MOUNTPOINT" python -m venv /opt/semgrep-venv &&
+     run arch-chroot "$MOUNTPOINT" /opt/semgrep-venv/bin/pip install "${pip_args[@]}" semgrep; then
+    info "semgrep installed (/opt/semgrep-venv/bin/semgrep)"
+  else
+    warn "semgrep could not be installed — kimrity-gate will report it missing; rerun: arch-chroot $MOUNTPOINT /opt/semgrep-venv/bin/pip install semgrep"
+  fi
+
+  # Only link what is really there: a broken symlink looks installed to `command -v`.
+  if [ -x "$MOUNTPOINT/opt/semgrep-venv/bin/semgrep" ]; then
+    run arch-chroot "$MOUNTPOINT" ln -sf /opt/semgrep-venv/bin/semgrep /usr/local/bin/semgrep
+  else
+    info "no /usr/local/bin/semgrep symlink (venv binary missing — sees the warn above)"
+  fi
 
   # nuclei: not packaged by Arch either — pinned release binary, best effort.
   # Daily repo scans do not need it; web scans report the missing tool clearly.
@@ -586,6 +770,9 @@ install_kim_services() {
     printf '[dry] rules.yaml -> /usr/local/share/kimlogpipe/rules.yaml\n'
     printf '[dry] systemd user units -> /usr/lib/systemd/user + enable symlinks\n'
     printf '[dry] audit rules -> /etc/audit/rules.d/kimrity.rules (key etc_watch)\n'
+    printf '[dry] auditd: log_group = systemd-journal + systemctl enable auditd\n'
+    printf '[dry] hardening: sysctl + sshd + audit identity drop-ins (0644, sshd -t + sysctl --system, best effort)\n'
+    printf '[dry] ssh-keygen -A + sshd -t inside the chroot (drop-in removed only on a real config error)\n'
     return 0
   fi
 
@@ -617,7 +804,82 @@ install_kim_services() {
   install -Dm644 "$SCRIPT_DIR/systemd/system/kimrity-audit.rules" \
     "$MOUNTPOINT/etc/audit/rules.d/kimrity.rules"
 
-  info "KimAI, KimLogPipe, rules and audit watches installed"
+  # auditd lives here, not in step 6: the audit package only arrives in step 9,
+  # and `systemctl enable auditd` on a missing unit exits 1 and aborts the run.
+  # log_group matches the systemd-journal membership added in step 6, which is
+  # what lets KimLogPipe read /var/log/audit/audit.log.
+  if [ -f "$MOUNTPOINT/etc/audit/auditd.conf" ]; then
+    run sed -i 's/^log_group =.*/log_group = systemd-journal/' "$MOUNTPOINT/etc/audit/auditd.conf"
+    run arch-chroot "$MOUNTPOINT" systemctl enable auditd
+  else
+    warn "audit is not installed — auditd not enabled (kimlogpipe has no audit source)"
+  fi
+
+  # Hardening payload (A, 16 Nov): these three files have shipped in the ISO
+  # since build 10, but no step ever applied them — the operator believed the
+  # machine was hardened when it was not. Best effort on purpose: this is the
+  # last step of a finished install, so a missing file or a rejected drop-in
+  # must warn and continue, never abort.
+  local hn=0 pair hsrc hdst
+  for pair in \
+    "hardening/sysctl/90-hardening.conf:/etc/sysctl.d/90-hardening.conf" \
+    "hardening/sshd/10-hardening.conf:/etc/ssh/sshd_config.d/10-hardening.conf" \
+    "hardening/audit/10-identity.rules:/etc/audit/rules.d/10-identity.rules"
+  do
+    hsrc="$SCRIPT_DIR/${pair%%:*}"; hdst="$MOUNTPOINT${pair#*:}"
+    if [ ! -f "$hsrc" ]; then
+      warn "hardening source missing: ${pair%%:*} — skipped"
+    elif install -Dm644 "$hsrc" "$hdst"; then
+      hn=$((hn + 1))
+    else
+      warn "hardening: could not write ${pair#*:} — skipped"
+    fi
+  done
+
+  # The audit rule file ships with __USER_HOME__ because a repo cannot know the
+  # login name. An audit watch on a missing path is accepted by auditd and then
+  # monitors nothing, so this substitution is not cosmetic.
+  local arules="$MOUNTPOINT/etc/audit/rules.d/10-identity.rules"
+  if [ -f "$arules" ] && grep -q '__USER_HOME__' "$arules"; then
+    run sed -i "s|__USER_HOME__|/home/$USERNAME|g" "$arules"
+    info "audit identity rules: __USER_HOME__ -> /home/$USERNAME"
+  fi
+
+  # sshd: validate the drop-in INSIDE the chroot. On a config failure remove it
+  # — a bad sshd config locks the operator out, so sshd keeps its default config
+  # and the install still finishes.
+  local sshd_dropin="$MOUNTPOINT/etc/ssh/sshd_config.d/10-hardening.conf"
+  if [ -f "$sshd_dropin" ]; then
+    # sshd -t wants /run/sshd, the same dir the unit creates via RuntimeDirectory
+    arch-chroot "$MOUNTPOINT" mkdir -p /run/sshd 2>/dev/null || true
+    # openssh ships NO host keys: sshd-gen-keys.service makes them on first boot.
+    # Without this, `sshd -t` in the chroot dies with "no hostkeys available"
+    # and a VALID drop-in would be deleted as if it were broken.
+    if arch-chroot "$MOUNTPOINT" ssh-keygen -A >/dev/null 2>&1; then
+      if arch-chroot "$MOUNTPOINT" sshd -t; then
+        info "sshd -t: hardening drop-in accepted"
+      else
+        rm -f "$sshd_dropin"; hn=$((hn - 1))
+        warn "sshd -t rejected the hardening drop-in — removed it (sshd stays on its default config)"
+      fi
+    else
+      # Cannot generate keys -> the config cannot be verified. Keep the drop-in:
+      # deleting a config we never validated is worse than shipping it.
+      warn "ssh-keygen -A failed — sshd -t skipped; hardening drop-in kept (check 'sshd -t' on first boot)"
+    fi
+  fi
+
+  # sysctl --system proves the file parses and applies the values to the running
+  # kernel now; the installed system applies /etc/sysctl.d on every boot anyway.
+  if [ -f "$MOUNTPOINT/etc/sysctl.d/90-hardening.conf" ]; then
+    if arch-chroot "$MOUNTPOINT" sysctl --system >/dev/null; then
+      info "sysctl --system: hardening values applied"
+    else
+      warn "sysctl --system reported an error — drop-in installed, values apply on boot"
+    fi
+  fi
+
+  info "KimAI, KimLogPipe, rules and audit watches installed; hardening: ${hn}/3 drop-ins (sysctl + sshd + audit identity)"
 }
 
 install_lab() {
@@ -694,7 +956,7 @@ finish() {
 
 System installed to $DISK. What is LEFT (manual, on purpose):
 
-  1. Set the passwords (this script does not touch them):
+  1. Passwords: prompted below (skip with --no-password). Manual fallback:
        arch-chroot $MOUNTPOINT passwd
        arch-chroot $MOUNTPOINT passwd $USERNAME
 
@@ -708,14 +970,66 @@ System installed to $DISK. What is LEFT (manual, on purpose):
 
   4. Log in as $USERNAME — Hyprland starts on its own.
 EOF
+
+  # Passwords (15 Nov): `useradd` leaves '!' in /etc/shadow, so sudo cannot
+  # authenticate and hyprlock (auth include login) cannot unlock. tty1 autologin
+  # hides that, but the machine ends up with no admin path. passwd talks to the
+  # terminal directly — nothing is piped in, nothing is captured.
+  if [ "$NO_PASSWORD" = 1 ] || [ ! -t 0 ]; then
+    warn "passwords not set — sudo and the hyprlock lock screen will not work until you run: arch-chroot $MOUNTPOINT passwd $USERNAME"
+  elif [ "$DRY" = 1 ]; then
+    printf '[dry] arch-chroot %s passwd\n' "$MOUNTPOINT"
+    printf '[dry] arch-chroot %s passwd %s\n' "$MOUNTPOINT" "$USERNAME"
+  else
+    step "Passwords (needed for sudo and the lock screen)"
+    printf '    %-13s%s\n' "root:" "arch-chroot $MOUNTPOINT passwd"
+    printf '    %-13s%s\n' "$USERNAME:" "arch-chroot $MOUNTPOINT passwd $USERNAME"
+
+    # A failed or Ctrl-C'd passwd must not turn a finished install into a
+    # failure: catch SIGINT locally, warn, and keep going.
+    local interrupted=0
+    trap 'interrupted=1' INT
+    if arch-chroot "$MOUNTPOINT" passwd; then :; else
+      interrupted=1; warn "root password not set"
+    fi
+    if [ "$interrupted" = 0 ]; then
+      if arch-chroot "$MOUNTPOINT" passwd "$USERNAME"; then :; else
+        interrupted=1; warn "$USERNAME password not set"
+      fi
+    fi
+    trap - INT
+    if [ "$interrupted" = 1 ]; then
+      warn "password setup incomplete — run: arch-chroot $MOUNTPOINT passwd $USERNAME"
+    fi
+  fi
+
+  # Key-only SSH is the intended policy (hardening/sshd/10-hardening.conf), but
+  # nothing on a fresh machine has a key yet, so say it loud at the end.
+  warn "SSH is key-only (PasswordAuthentication no). No key is installed yet:"
+  info "add ~/.ssh/authorized_keys or you cannot log in over SSH."
 }
 
 # ---------------------------------------------------------------------- main
 main() {
   if [ "$DRY" = 0 ]; then
-    mkdir -p "$(dirname "$LOG")"
-    exec > >(tee -a "$LOG") 2>&1
+    if mkdir -p "$(dirname "$LOG")" 2>/dev/null && { : >> "$LOG"; } 2>/dev/null; then
+      # trap - ERR first: the tee child inherits the failure trap otherwise and
+      # would print a stale "step setup" line when it exits (non-root tests).
+      # The writability probe above matters: a tee that cannot open the log
+      # exits at once and swallows every later message.
+      exec > >(trap - ERR; exec tee -a "$LOG") 2>&1
+    else
+      warn "no log file: cannot write $LOG (run as root) — continuing on the terminal"
+    fi
   fi
+
+  # Resolved settings, printed before anything is touched. A dry run is only
+  # useful if it shows the values it would use (old runs silently assumed
+  # en_US/us even after the operator asked for something else).
+  info "disk=$DISK  dry_run=$DRY"
+  info "hostname=$HOSTNAME  user=$USERNAME (uid $USER_UID)  timezone=$TIMEZONE"
+  info "locale=$LOCALE  keymap=$KEYMAP  mountpoint=$MOUNTPOINT  opts=$MOUNT_OPTS"
+  info "target: root subvol=$ROOT_SUBVOL  home=$HOME_SUBVOL  snapshots=$SNAP_SUBVOL  esp=$ESP_LABEL"
 
   preflight
   confirm

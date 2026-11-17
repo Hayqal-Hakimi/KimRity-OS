@@ -56,7 +56,11 @@ ShellRoot {
     property int newWs: 1
     property var tools: []
     property var toolHits: []
-    readonly property string homeDir: Quickshell.env("HOME") || "/home/hayqal"
+    // HOME comes from the environment; the old literal "/home/hayqal" fallback
+    // wrote presets into a stranger's path on any machine with another user.
+    // If HOME is somehow empty, Quickshell.env("USER") keeps it correct.
+    readonly property string homeDir: Quickshell.env("HOME")
+        || ("/home/" + (Quickshell.env("USER") || ""))
     readonly property string confPath: homeDir + "/.config/kimrity/workspaces.conf"
 
     // ---------------- notes ----------------

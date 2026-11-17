@@ -11,7 +11,10 @@
 -w /etc/sudoers.d/        -p wa -k privilege
 
 -w /root/.ssh/            -p wa -k ssh_keys
--w /home/hayqal/.ssh/     -p wa -k ssh_keys
+# __USER_HOME__ is replaced by install.sh with /home/<the user being created>.
+# Shipping a literal path would silently watch a directory that does not exist
+# on any machine where the login name differs (auditd accepts it without error).
+-w __USER_HOME__/.ssh/    -p wa -k ssh_keys
 -w /etc/ssh/sshd_config   -p wa -k ssh_config
 -w /etc/ssh/sshd_config.d/ -p wa -k ssh_config
 

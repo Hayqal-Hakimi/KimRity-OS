@@ -3,7 +3,7 @@
 set -u
 choice="$(printf 'Lock\nLog out\nReboot\nPower off' | wofi --dmenu -p 'power')" || exit 0
 case "$choice" in
-  Lock)        exec hyprlock ;;
+  Lock)        exec "$HOME/.local/bin/lock" ;;
   'Log out')   exec hyprctl dispatch exit ;;
   Reboot)      exec systemctl reboot ;;
   'Power off') exec systemctl poweroff ;;

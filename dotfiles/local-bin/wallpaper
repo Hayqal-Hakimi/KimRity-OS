@@ -1,4 +1,10 @@
 #!/bin/sh
 # wallpaper — KimRity solid background (avoids quoting '#' issues in hyprland.conf).
+set -u
+# swaybg comes from DESKTOP_PKGS; without it the session simply stays black.
+command -v swaybg >/dev/null 2>&1 || {
+    notify-send "KimRity" "swaybg is not installed - no wallpaper" 2>/dev/null
+    exit 1
+}
 pkill -x swaybg 2>/dev/null
 exec swaybg -c '#1e1e2e'

@@ -7,14 +7,17 @@ age=999999
 
 if [ "$age" -gt 86400 ]; then
     mkdir -p "$(dirname "$cache")"
+    tmp="$cache.tmp.$$"   # per-process name: two concurrent callers cannot half-write $cache
     {
         printf '%s\n' "$PATH" | tr ':' '\n'
         printf '%s\n' "$HOME/.local/bin"
     } | while IFS= read -r d; do
         [ -n "$d" ] && [ -d "$d" ] || continue
-        find "$d" -maxdepth 1 -type f -perm -u+x -printf '%f\n' 2>/dev/null
-    done | grep -vE '\.(sh|py|conf|txt|desktop|bak|old)$' | sort -u > "$cache.tmp" \
-        && mv "$cache.tmp" "$cache"
+        # -L: many /usr/bin entries are symlinks (sh, python3); -type f alone hides them.
+        find -L "$d" -maxdepth 1 -type f -perm -u+x -printf '%f\n' 2>/dev/null
+    done | grep -vE '\.(sh|py|conf|txt|desktop|bak|old)$' | sort -u > "$tmp"
+    [ -s "$tmp" ] && mv "$tmp" "$cache"
+    rm -f "$tmp"
 fi
 
 cat "$cache"

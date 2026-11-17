@@ -21,12 +21,19 @@ fi
 lines=$(grep "^${preset}|" "$conf" 2>/dev/null) || true
 [ -n "$lines" ] || { echo "preset ${preset} missing in $conf" >&2; exit 1; }
 
-printf '%s\n' "$lines" | while IFS='|' read -r p label ws tool args; do
-    # legacy row: field 4 = full command (e.g. "kitty -e btop")
-    if [ -z "${args:-}" ] && [ -n "${tool:-}" ]; then
-        case "$tool" in
-            *" "*) args=${tool#* }; tool=${tool%% *} ;;
-        esac
+printf '%s\n' "$lines" | while IFS='|' read -r p label ws f4 f5; do
+    # Row = preset|label|ws|<command> or preset|label|ws|tool|args. Field 5 is
+    # a bare binary only when field 4 has no space; otherwise fields 4+5 are one
+    # command, so a '|' inside it (e.g. "suricata --build-info | head") cannot
+    # split the row into a bogus binary name.
+    if [ -n "${f5:-}" ] && [ "${f4%% *}" = "$f4" ]; then
+        tool=$f4
+        args=$f5
+    else
+        cmd4="${f4}${f5:+|$f5}"
+        tool=${cmd4%% *}
+        args=${cmd4#* }
+        [ "$args" = "$cmd4" ] && args=""
     fi
     # legacy row: bare link -> open with the browser
     case "$tool" in

@@ -1,0 +1,25 @@
+#!/bin/sh
+# lock — lock the session, but never into a door you cannot open again.
+#
+# Why this exists: install.sh deliberately never sets passwords, so a fresh
+# install has `!` in /etc/shadow (locked account). hyprlock authenticates
+# through PAM (`/etc/pam.d/hyprlock` includes `login` -> `system-auth` ->
+# pam_unix), and pam_unix cannot authenticate a locked account. A plain
+# `hyprlock` on a 5-minute idle timer would therefore lock the screen with no
+# way back in. Gate on `passwd -S`: "P" means a usable password exists.
+#
+# Used by: hypridle `lock_cmd` and the SUPER+L binding in hyprland.lua.
+set -u
+
+state=$(passwd -S 2>/dev/null | awk '{print $2}')
+case "$state" in
+    P|PS) exec hyprlock ;;
+    *)
+        # Say it once per lock attempt, not once per second.
+        notify-send -u critical "KimRity: lock screen disabled" \
+            "No password set for $(id -un). Run 'passwd' once, then super+L works." \
+            2>/dev/null || true
+        echo "lock: skipped, no password set (passwd -S: ${state:-unknown})" >&2
+        exit 1
+        ;;
+esac

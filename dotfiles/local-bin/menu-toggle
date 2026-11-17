@@ -1,8 +1,32 @@
 #!/bin/sh
 # menu-toggle — open/close the Quickshell menu (start the daemon if needed).
+set -u
+
+# quickshell ships `qs`; without it SUPER+D would do nothing and say nothing.
+command -v qs >/dev/null 2>&1 || {
+    notify-send "KimRity" "quickshell (qs) is not installed - no menu" 2>/dev/null
+    exit 1
+}
+
+# Toggle first: a success here proves an instance is already answering.
 if qs ipc -c kimrity call menu toggle >/dev/null 2>&1; then
     exit 0
 fi
-qs -c kimrity -d >/dev/null 2>&1
-sleep 0.5
-qs ipc -c kimrity call menu openMenu >/dev/null 2>&1
+
+# -n/--no-duplicate: never spawn a second shell (two overlapping panels) when
+# an instance exists but missed the first IPC call.
+qs -c kimrity -n -d >/dev/null 2>&1
+
+# A cold start is slower than one fixed sleep: poll the menu IPC for at most
+# ~6s so this can never hang, and say so when the menu really did not open.
+i=0
+while [ "$i" -lt 30 ]; do
+    if qs ipc -c kimrity call menu openMenu >/dev/null 2>&1; then
+        exit 0
+    fi
+    sleep 0.2
+    i=$((i + 1))
+done
+
+notify-send "KimRity" "menu did not open (quickshell config: kimrity)" 2>/dev/null
+exit 1
