@@ -354,3 +354,40 @@ supaya artifak yang diuji kekal sepadan dengan repo.
 Hutang lain yang dicatat, bukan disorok: `install.sh:711` masih menulis `v3.11.1` sebagai literal
 dalam mesej `--dry-run` walaupun `NUCLEI_VERSION` sudah diisytihar di baris 215 (mesej sahaja;
 tidak mengubah apa yang dipasang) — Build 16.
+
+### Build 16 — pembetulan penemuan audit lapis kedua (18 Nov)
+
+Audit lapis kedua (agent percuma, laporan di `/tmp/opencode/report-kimscan.md`) menemui 7 perkara
+dalam `kimscan` + `kimlogpipe`; semuanya saya sahkan semula dalam kod sebelum menyentuh apa-apa.
+Enam dibetulkan, satu ditangguhkan kerana ia keputusan reka bentuk. Baseline sebelum perubahan:
+`kimlogpipe` **98/98**, `kimscan` **35/35** — selepas perubahan, kedua-dua masih **98/98** dan **35/35**.
+
+| # | Kecacatan | Pembetulan | Bukti regresi |
+|---|---|---|---|
+| 1 | `journalctl` menulis ke `stderr=PIPE` yang tiada pembaca → paip penuh (~64 KiB), `journalctl` tersekat, stdout berhenti, pemantau nampak "hidup" tetapi 0 event | thread kecil mengalirkan stderr ke 50 baris terakhir | `journalctl` palsu menulis **512 KiB** ke stderr → event masih masuk (`n=1`) |
+| 2 | ralat follower menamatkan enjin dengan **exit 0**; `Restart=on-failure` tidak restart | `follower_failed` → `shutdown()` pulang 1 | `journalctl` palsu `exit 1` → `kimlogpipe follow` keluar **rc=1** |
+| 3 | `Include` sshd dikembangkan di **hujung** fail, sedangkan sshd mengambil nilai **pertama** → drop-in `PasswordAuthentication yes` dilaporkan bersih (false negative) | `_sshd_lines()` mengembangkan `Include` **di tempatnya**, kekal dalam `SYSROOT` | fixture drop-in `yes` → `sshd:passwordauthentication` muncul dalam `posture` |
+| 4 | `posture_item()` tiada `fp`; `status <n>` menukar nombor → `''` → sentiasa gagal | guna `fp`, jika tiada guna `key` | `kimscan status <sesi> 1 accepted` → exit 0 |
+| 5 | artifak 0755/0644: baris log penuh + `gitleaks.json` (secret/match) boleh dibaca user lain | fail `0600`, direktori `0700` | `session.json=600`, dir `700`, `events.jsonl=600` |
+| 6 | `PASS` di sebelah finding HIGH di bawah `--fail-on critical` | **tidak diubah** — keputusan reka bentuk verdict, bukan pepijat | — |
+| 7 | `EVENT_ROTATE_BYTES` / `DEFAULT_COOLDOWN` hardcoded, bercanggah dengan dakwaan `rules.yaml` | boleh di-override melalui `KIMLOGPIPE_ROTATE_BYTES` / `KIMLOGPIPE_COOLDOWN` | `KIMLOGPIPE_ROTATE_BYTES=12345` → pemalar 12345 |
+
+Ujian regresi keenam-enamnya disimpan dalam repo: `tests/build16-regressions.sh` (10 saat, tiada
+kebergantungan luar selain bash + python3). Sebelum ini ia hanya wujud dalam `/tmp` — itu bukan bukti
+yang boleh disemak semula, jadi ia dipindahkan ke repo.
+
+#### ISO Build 16
+
+| Perkara | Nilai |
+|---|---|
+| Fail | `kimrity-2026.11.18-x86_64.iso` (menggantikan Build 15; nama sama kerana tarikh sama) |
+| Saiz | 1,327,243,264 bait (1.24 GiB) |
+| sha256 | `f5b8320d17d3195c5883b10be395c3b49bc891bfcd9cf0989472029b9947671e` |
+| `verify-iso.sh` | **19/19**, 0 gagal (`EXIT=0`, dibina ke `KIMRITY_OUT` berasingan supaya ISO Build 15 tidak ditimpa semasa proses) |
+| Ujian install/boot | install `==> Done` (`INSTALL_EXIT=0`) → `verify-installed.sh` **66/66** (RAM 646 MiB, disk 2.7 GB) → reboot `boot_id` `e66b8a19…`→`2c0eb9a2…`, SSH balik ~10 s, **66/66** lagi, `--failed` 0/0 → boot **7.399 s** (userspace 1.959, `graphical.target` 1.826) |
+
+Bukti pembetulan **di dalam sistem terpasang** (bukan hanya ujian hos):
+`kimscan status <sesi> 1 accepted` → `rc=0` (dahulu sentiasa `fp '' not found`); `session.json` dan
+`report.md` **0600**, direktori sesi **0700**; `kimscan posture` masih berjalan dan `kimscan`/`nuclei`/
+`semgrep` hadir. Nota jujur: direktori induk `~/.local/share/kimscanning/sessions` kekal **0755** —
+ia hanya mendedahkan id sesi, bukan kandungan; kandungan dilindungi oleh 0700/0600 di dalamnya.

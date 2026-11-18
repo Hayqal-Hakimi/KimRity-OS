@@ -1,6 +1,6 @@
 # KimRity OS — operator manual
 
-Last verified: 2026-11-18 against `kimrity-2026.11.18-x86_64.iso` (Build 15)
+Last verified: 2026-11-18 against `kimrity-2026.11.18-x86_64.iso` (Build 16)
 
 One operator's Arch + Hyprland workstation: a daily desktop, the always-installed host tools
 (`kimrity-gate`, `kimscan`), and a local pipeline (`kimai` + `kimlogpipe`) recording what the
@@ -13,7 +13,7 @@ swap partition (zram only). Built for an i5-4590 / 7.2 GiB host; the test VM get
 |---|---|---|
 | Installed footprint | ≤ 5 GB | `yes \| pacman -Scc` is the last install step; check `df -h /` |
 | ISO size | ≤ 1.4 GB | `tools/verify-iso.sh` fails above 1,400,000,000 bytes |
-| Idle RAM, boot time | ≤ 900 MB, ≤ 12 s | measured in the installed system: `free -m` 620 MiB, `systemd-analyze` 8.291 s (Build 15; 11.938 s on the first boot) |
+| Idle RAM, boot time | ≤ 900 MB, ≤ 12 s | measured in the installed system: `free -m` 646 MiB, `systemd-analyze` 7.399 s (Build 16) |
 
 ## 2. Build the ISO
 
@@ -31,7 +31,7 @@ swap partition (zram only). Built for an i5-4590 / 7.2 GiB host; the test VM get
   has shipped before (an old `kimscanning/rules/en.yaml`, caught only by `verify-iso.sh`).
 - The profile is `iso/` (`profiledef.sh`: `iso_name=kimrity`, `uefi.systemd-boot`, squashfs xz);
   the last build left `iso-out/kimrity-2026.11.18-x86_64.iso` (1.24 GiB, sha256
-  `58970869…`, `verify-iso.sh` 19/19, and a full install/boot/reboot test on a blank 24 GiB disk).
+  `f5b8320d…`, `verify-iso.sh` 19/19, and a full install/boot/reboot test on a blank 24 GiB disk).
   `iso-out/` holds exactly one ISO: delete the old one after the new one verifies.
 - `iso/README.md` documents the profile (required files, build command, `-cdrom` gotcha).
   `iso/pacman.conf` is required by
@@ -255,9 +255,10 @@ scp -P <SSH_PORT> -i "$BASE/vmkey" tools/verify-installed.sh hayqal@127.0.0.1:~/
 ssh -p <SSH_PORT> -i "$BASE/vmkey" hayqal@127.0.0.1 'bash ~/verify-installed.sh'   # 66 checks
 ```
 
-The reference run (18 Nov, Build 15): install `Done` on a blank 24 GiB disk (nuclei v3.11.1 with a
-verified sha256, semgrep from the local wheelhouse), boot with no ISO, **66/66** checks (RAM 620 MiB,
-disk 2.7 GB), `systemctl reboot`, `boot_id` `0df943c3…` -> `3bb5ccbc…`, SSH back in ~15 s, **66/66
-again** with `systemctl --failed` and `--user --failed` both 0, boot **8.291 s** (11.938 s on the
-first boot). Hardening was proven inside the installed system, not assumed: 22 audit rules
+The reference run (18 Nov, Build 16): install `Done` on a blank 24 GiB disk (nuclei v3.11.1 with a
+verified sha256, semgrep from the local wheelhouse), boot with no ISO in ~15 s, **66/66** checks
+(RAM 646 MiB, disk 2.7 GB), `systemctl reboot`, `boot_id` `e66b8a19…` -> `2c0eb9a2…`, SSH back in
+~10 s, **66/66 again** with `systemctl --failed` and `--user --failed` both 0, boot **7.399 s**.
+Inside that system `kimscan status <session> 1 accepted` exits 0 and evidence is 0600 in a 0700
+directory (both were broken before Build 16). Hardening was proven inside the installed system, not assumed: 22 audit rules
 (`auditctl -l`), `PasswordAuthentication no`, `PermitRootLogin prohibit-password`, `kptr_restrict=2`.
