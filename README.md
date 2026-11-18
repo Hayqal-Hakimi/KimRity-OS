@@ -114,7 +114,7 @@ swapon --show                                      # /dev/zram0
 df -h /                                            # footprint vs the 5 GB target
 kimscan doctor
 sudo -E kimscan posture | grep Coverage            # shadow + sudoers need root
-~/verify-installed.sh                              # 66 checks, exit 1 on a FAIL
+~/verify-installed.sh                              # 68 checks, exit 1 on a FAIL
                                                    # (copy from /root/tools/ on the live ISO)
 ```
 
@@ -224,11 +224,15 @@ the ISO and run `install.sh` again (it erases the disk).
 ./tools/verify-iso.sh                  # newest in iso-out/; or pass a path
 ```
 
-Runs as your user (xorriso + unsquashfs, no root, no loop mount) and exits 1 on any of its 19
-checks: ISO ≤ 1.4 GB; squashfs extractable; 13 payload comparisons byte-identical to the repo
-(`install.sh`, `hyprland.lua`, `gate.py`, `kimai`, `kimlogpipe` + `rules.yaml`, `kimscan`,
-`en.yaml`, both user units, audit rules, plus the live `kimscan`/`en.yaml`); `/usr/local/bin/kimscan`
-is `755`; motd says `installer (12 steps`; `HOSTNAME="kimrity"`; no Malay stopwords.
+Runs as your user (xorriso + unsquashfs, no root, no loop mount) and exits 1 on any of its 71
+checks: ISO ≤ 1.4 GB; squashfs extractable; **all 65 files** `sync-iso.sh` ships compared
+byte-for-byte with the repo (`install.sh`, every file under `dotfiles/`, `hardening/`, `tools/`,
+`systemd/`, `kimai/`, `kimlogpipe/`, `kimscanning/`, `gate/`, plus the live `kimscan`/`en.yaml`);
+`/usr/local/bin/kimscan` is `755`; motd says `installer (12 steps`; `HOSTNAME="kimrity"`; no Malay
+stopwords.
+
+Build 17 widened this from 13 hand-picked comparisons to all 65 after the narrower gate passed an
+ISO that carried three stale files. It costs ~5 s: the whole gate runs in under 5 s.
 
 ### Prove an install end to end (QEMU, no risk to the host)
 
@@ -252,7 +256,7 @@ After `boot` succeeds, the health checks run *inside* the installed system:
 
 ```sh
 scp -P <SSH_PORT> -i "$BASE/vmkey" tools/verify-installed.sh hayqal@127.0.0.1:~/verify-installed.sh
-ssh -p <SSH_PORT> -i "$BASE/vmkey" hayqal@127.0.0.1 'bash ~/verify-installed.sh'   # 66 checks
+ssh -p <SSH_PORT> -i "$BASE/vmkey" hayqal@127.0.0.1 'bash ~/verify-installed.sh'   # 68 checks
 ```
 
 The reference run (18 Nov, Build 16): install `Done` on a blank 24 GiB disk (nuclei v3.11.1 with a

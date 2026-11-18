@@ -5,6 +5,10 @@
 # into the installed system, so a stale ISO profile silently shipped a 33-entry
 # dictionary instead of 41. The only way to see it was to mount the squashfs.
 #
+# Build 17: section 2 compares ALL 65 files sync-iso.sh ships against the repo.
+# Section 5 of the README used to claim "13 payload comparisons"; 52 files were
+# never checked, so drift in a dotfile or helper script could not fail the gate.
+#
 # The ISO is read with xorriso + unsquashfs as your own user — no root, no loop
 # mount, nothing left behind.
 #
@@ -54,7 +58,7 @@ else
   exit 1
 fi
 
-section "2. payload equals the repo"
+section "2. every shipped file equals the repo"
 cmp_sfs() {  # cmp_sfs <path inside sfs> <repo path>
   if unsquashfs -cat "$SFS" "$1" 2>/dev/null | cmp -s - "$2"; then
     pass "$1"
@@ -62,17 +66,20 @@ cmp_sfs() {  # cmp_sfs <path inside sfs> <repo path>
     fail "$1 differs from $2"
   fi
 }
+cmp_tree() {  # cmp_tree <dir inside sfs> <repo dir>
+  local rel
+  while IFS= read -r -d '' f; do
+    rel=${f#"$2"/}
+    cmp_sfs "$1/$rel" "$f"
+  done < <(find "$2" -type f ! -path '*/__pycache__/*' -print0)
+}
+# Build 17: compare every file sync-iso.sh ships, not 13 hand-picked ones.
+# The old list left 52 of 65 files unproven, so a stale dotfile, systemd unit or
+# helper script could reach the installer while the gate still said 19/19.
 cmp_sfs /root/install.sh install.sh
-cmp_sfs /root/dotfiles/hypr/hyprland.lua dotfiles/hypr/hyprland.lua
-cmp_sfs /root/gate/gate.py gate/gate.py
-cmp_sfs /root/kimai/kimai kimai/kimai
-cmp_sfs /root/kimlogpipe/kimlogpipe kimlogpipe/kimlogpipe
-cmp_sfs /root/kimlogpipe/rules.yaml kimlogpipe/rules.yaml
-cmp_sfs /root/kimscanning/kimscan kimscanning/kimscan
-cmp_sfs /root/kimscanning/rules/en.yaml kimscanning/rules/en.yaml
-cmp_sfs /root/systemd/user/kimai.service systemd/user/kimai.service
-cmp_sfs /root/systemd/user/kimlogpipe.service systemd/user/kimlogpipe.service
-cmp_sfs /root/systemd/system/kimrity-audit.rules systemd/system/kimrity-audit.rules
+for d in dotfiles hardening tools systemd kimai kimlogpipe kimscanning gate; do
+  cmp_tree "/root/$d" "$d"
+done
 cmp_sfs /usr/local/bin/kimscan kimscanning/kimscan
 cmp_sfs /usr/local/share/kimscanning/rules/en.yaml kimscanning/rules/en.yaml
 

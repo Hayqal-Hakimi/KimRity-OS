@@ -708,7 +708,7 @@ install_gate_tools() {
       printf '[dry] pip --no-index --find-links %s%s (local wheelhouse only)\n' \
         "$find_links" "${trust_host:+ --trusted-host $trust_host}"
     fi
-    printf '[dry] nuclei pinned binary (v3.11.1) -> /usr/local/bin/nuclei (best effort)\n'
+    printf '[dry] nuclei pinned binary (v%s) -> /usr/local/bin/nuclei (best effort)\n' "$NUCLEI_VERSION"
     printf '[dry] gitleaks/trivy/nikto/ssh-audit arrive via TOOL_PKGS (step 9)\n'
     return 0
   fi

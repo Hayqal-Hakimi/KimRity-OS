@@ -98,6 +98,10 @@ command -v kimscan >/dev/null && ok "kimscan on PATH" || bad "kimscan missing"
 [ -f /usr/local/share/kimscanning/rules/en.yaml ] && ok "en.yaml rules present" || bad "en.yaml rules missing"
 grep -q 'SUPER + SHIFT + K' "$HOME/.config/hypr/hyprland.lua" 2>/dev/null \
   && ok "keybind SUPER+SHIFT+K in hyprland.lua" || bad "keybind SUPER+SHIFT+K missing"
+# The install is fail-soft for both engines, so a skipped download would still
+# print 66 OK lines. Build 17 makes their absence a FAIL.
+command -v nuclei >/dev/null && ok "nuclei on PATH" || bad "nuclei missing (web scans will flag it)"
+command -v semgrep >/dev/null && ok "semgrep on PATH" || bad "semgrep missing (SAST rule class disabled)"
 out=$(kimscan posture --json 2>/dev/null || kimscan posture 2>/dev/null)
 if [ -n "$out" ]; then
   ev=$(printf '%s' "$out" | grep -c 'evaluated' || true)
