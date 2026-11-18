@@ -391,3 +391,53 @@ Bukti pembetulan **di dalam sistem terpasang** (bukan hanya ujian hos):
 `report.md` **0600**, direktori sesi **0700**; `kimscan posture` masih berjalan dan `kimscan`/`nuclei`/
 `semgrep` hadir. Nota jujur: direktori induk `~/.local/share/kimscanning/sessions` kekal **0755** —
 ia hanya mendedahkan id sesi, bukan kandungan; kandungan dilindungi oleh 0700/0600 di dalamnya.
+### Build 17 — gerbang bukti diperkuat (18 Nov)
+
+Build 17 bermula daripada satu soalan yang saya tidak pernah tanya sebelum ini: **berapa banyak
+fail yang ISO hantar, dan berapa banyak yang gerbang sebenarnya uji?** Jawapannya tidak selesa.
+
+`sync-iso.sh` menyalin **65 fail** (install.sh, seluruh `dotfiles/`, `hardening/`, `tools/`,
+`systemd/`, `kimai/`, `kimlogpipe/`, `kimscanning/`, `gate/`, ditambah dua fail live). `verify-iso.sh`
+hanya membandingkan **13** daripadanya — 20%. Baki 52 fail (termasuk 24 fail `dotfiles/` dan 11
+fail `tools/`) hanya diuji secara tidak langsung, jadi drift pada salah satunya tidak akan
+menggagalkan gerbang.
+
+Saya buktikan jurang itu dua arah sebelum mengubah gerbang:
+
+1. **ISO 16 sebenarnya bersih.** Skrip sementara di `/tmp` membandingkan setiap fail yang dihantar:
+   `same=65 differs=0 missing=0`. Jadi tiada pepijat dalam ISO 16 — yang lemah ialah gerbangnya.
+2. **Gerbang baharu benar-benar menangkap drift.** Selepas menukar gerbang kepada liputan penuh,
+   saya jalankan ia pada ISO 16 (yang dibina sebelum perubahan). Ia gagal **tepat tiga** fail yang
+   saya ubah — `/root/install.sh`, `/root/tools/verify-iso.sh`, `/root/tools/verify-installed.sh` —
+   dan lulus 68 yang lain (`Pass: 68  Fail: 3`). Gerbang yang lulus semuanya tidak membuktikan
+   apa-apa; gerbang yang gagal pada fail yang betul, itu bukti.
+
+| # | Perkara | Sebelum | Selepas | Bukti |
+|---|---|---|---|---|
+| 1 | Liputan payload gerbang | 13/65 fail (20%) | **65/65 fail (100%)** | ujian negatif pada ISO 16: 3 FAIL tepat pada fail yang diubah, 68 OK; masa penuh **4.7 s** |
+| 2 | `install.sh:711` literal `v3.11.1` (peraturan #10) | literal dalam mesej dry-run | `printf '…v%s…' "$NUCLEI_VERSION"` | default cetak `v3.11.1`; `NUCLEI_VERSION=9.9.9` cetak `v9.9.9` |
+| 3 | `verify-installed.sh` tidak menyemak enjin (66 semakan) | `nuclei`/`semgrep` hilang masih 66/66 | 2 semakan baharu → **68** | ujian dalam guest (di bawah) |
+
+Kesan sampingan yang perlu dicatat: `verify-installed.sh` kini **FAIL** jika `semgrep` atau `nuclei`
+tiada. Installer memang fail-soft (jaringan gagal → teruskan), tetapi gerbang pengesahan tidak lagi
+boleh melaporkan sistem "lengkap" apabila enjin keselamatan hilang. Itu perubahan makna yang
+disengajakan, bukan kemalangan.
+
+#### ISO Build 17
+
+| Perkara | Nilai |
+|---|---|
+| Fail | `kimrity-2026.11.18-x86_64.iso` (menggantikan Build 16) |
+| Saiz | 1,327,243,264 bait (1.24 GiB) — sama seperti Build 16 |
+| sha256 | `4d66b087a8795af05d2c13eb18fca08bc1f75f7aa571050c0a3f40eee612b13d` |
+| `verify-iso.sh` | **71/71**, 0 gagal (`EXIT=0`) — dari 19 semakan dalam Build 16 |
+| Ujian install/boot | install `==> Done` (`INSTALL_EXIT=0`, 0 langkah gagal) → boot dari cakera (SSH ~15 s) → **68/68** (RAM 635 MiB, disk 2.8 GB) → reboot `boot_id` `b6d24dc1…`→`686f57e1…`, SSH ~15 s, **68/68** lagi, `--failed` 0/0 → boot **7.548 s** (userspace 2.025, `graphical.target` 1.879) |
+| `verify-installed.sh` | **68/68**, 0 gagal — termasuk `nuclei` dan `semgrep` yang kini wajib |
+
+Hutang baharu yang saya cipta dan akui: dalam `cmp_tree()`, jika `find` gagal (contoh direktori
+hilang), gelung kosong dan tiada `fail` dipanggil — gerbang akan lulus dengan lebih sedikit
+perbandingan tanpa amaran. Pengawal `[ "$n" -gt 0 ] || fail ...` akan ditambah dalam Build 18;
+membetulkannya sekarang akan menjadikan repo berbeza daripada ISO yang sedang dibina.
+
+Ujian yang dijalankan sebelum build: `bash -n` 3/3 · `tests/part.sh` 3/3 · `tests/build16-regressions.sh`
+6/6 · dry-run versi dua hala · `sync-iso.sh --check` bersih.
