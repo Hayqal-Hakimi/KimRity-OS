@@ -62,8 +62,10 @@ AUDIT_LOG = os.environ.get("KIMLOGPIPE_AUDIT_LOG", "/var/log/audit/audit.log")
 JOURNAL_LINES = int(os.environ.get("KIMLOGPIPE_JOURNAL_LINES", "2000"))
 FLUSH_SECONDS = float(os.environ.get("KIMLOGPIPE_FLUSH_SECONDS", "1.0"))
 RING_SIZE = int(os.environ.get("KIMLOGPIPE_RING", "5000"))
-EVENT_ROTATE_BYTES = 20 * 1024 * 1024
-DEFAULT_COOLDOWN = 900
+# Environment-tunable so rules.yaml's promise ("the engine hardcodes no
+# threshold value") stays true; same pattern as KIMLOGPIPE_RING above.
+EVENT_ROTATE_BYTES = int(os.environ.get("KIMLOGPIPE_ROTATE_BYTES", str(20 * 1024 * 1024)))
+DEFAULT_COOLDOWN = int(os.environ.get("KIMLOGPIPE_COOLDOWN", "900"))
 ALERT_STATE_LIMIT = 500
 
 PLACEHOLDERS = {
@@ -91,7 +93,7 @@ def data_dir() -> Path:
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     base = Path(xdg) if xdg else Path.home() / ".local" / "share"
     d = base / APP
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
     return d
 
 
@@ -885,6 +887,7 @@ def atomic_write(path: Path, text: str) -> None:
         fh.write(text)
         fh.flush()
         os.fsync(fh.fileno())
+    os.chmod(tmp, 0o600)          # evidence holds raw log lines and secrets
     os.replace(tmp, path)
 
 
@@ -941,12 +944,14 @@ def append_events(events, raw_pairs) -> None:
     _rotate_if_big(raw_path())
     if events:
         with events_path().open("a", encoding="utf-8") as fh:
+            os.chmod(fh.name, 0o600)   # raw log lines live in the sibling file
             for ev in events:
                 fh.write(json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
     if raw_pairs:
         with raw_path().open("a", encoding="utf-8") as fh:
+            os.chmod(fh.name, 0o600)   # full log lines: commands, paths, users
             for ref, line in raw_pairs:
                 fh.write(
                     json.dumps({"raw_ref": ref, "line": line}, ensure_ascii=False) + "\n"
@@ -1633,14 +1638,28 @@ class JournaldFollower(threading.Thread):
             self.out.put(("error", f"journalctl failed to start: {exc}"))
             return
         assert self.proc.stdout is not None
+        # journalctl reports errors on stderr. With stderr=PIPE and nobody
+        # reading it, a burst of errors fills the ~64 KiB pipe buffer, journalctl
+        # blocks, and stdout stops too: the follower looks alive while ingesting
+        # nothing (Build 16 audit).
+        self._stderr_tail = []
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
         for line in self.proc.stdout:
             line = line.strip()
             if line:
                 self.out.put(("line", line))
-        detail = ""
-        if self.proc.stderr is not None:
-            detail = (self.proc.stderr.read() or "").strip()
+        detail = "\n".join(self._stderr_tail).strip()
         self.out.put(("error", detail or "journalctl exited"))
+
+    def _drain_stderr(self) -> None:
+        if self.proc is None or self.proc.stderr is None:
+            return
+        try:
+            for line in self.proc.stderr:
+                self._stderr_tail.append(line.rstrip())
+                del self._stderr_tail[:-50]
+        except (ValueError, OSError):
+            pass
 
     def stop(self):
         if self.proc and self.proc.poll() is None:
@@ -1783,6 +1802,7 @@ class FollowEngine:
         self.kimai_detail = ""
         self.journald_queue = queue.Queue()
         self.journald = None
+        self.follower_failed = False
         self.audit = None
         self.audit_builder = AuditBuilder(AUDIT_LOG)
         self.audit_readable = True
@@ -1828,6 +1848,9 @@ class FollowEngine:
                 break
             if kind == "error":
                 log(f"journald follower stopped: {payload}")
+                # Exit non-zero: the unit is Restart=on-failure, so dying must
+                # not look like a clean shutdown (Build 16 audit).
+                self.follower_failed = True
                 self.stop.set()
                 return events, raw_pairs
             try:
@@ -2119,7 +2142,7 @@ class FollowEngine:
             "sources": self.sources,
         }
         save_state(self.state)
-        return 0
+        return 1 if self.follower_failed else 0
 
 
 def cmd_follow(args):
