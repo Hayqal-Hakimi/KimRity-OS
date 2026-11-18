@@ -1,6 +1,6 @@
 # KimRity OS — operator manual
 
-Last verified: 2026-11-17 against `kimrity-2026.11.17-x86_64.iso` (Build 14)
+Last verified: 2026-11-18 against `kimrity-2026.11.18-x86_64.iso` (Build 15)
 
 One operator's Arch + Hyprland workstation: a daily desktop, the always-installed host tools
 (`kimrity-gate`, `kimscan`), and a local pipeline (`kimai` + `kimlogpipe`) recording what the
@@ -13,7 +13,7 @@ swap partition (zram only). Built for an i5-4590 / 7.2 GiB host; the test VM get
 |---|---|---|
 | Installed footprint | ≤ 5 GB | `yes \| pacman -Scc` is the last install step; check `df -h /` |
 | ISO size | ≤ 1.4 GB | `tools/verify-iso.sh` fails above 1,400,000,000 bytes |
-| Idle RAM, boot time | ≤ 900 MB, ≤ 12 s | measured in the installed system: `free -m` 686 MiB, `systemd-analyze` 7.804 s (Build 14) |
+| Idle RAM, boot time | ≤ 900 MB, ≤ 12 s | measured in the installed system: `free -m` 620 MiB, `systemd-analyze` 8.291 s (Build 15; 11.938 s on the first boot) |
 
 ## 2. Build the ISO
 
@@ -30,8 +30,8 @@ swap partition (zram only). Built for an i5-4590 / 7.2 GiB host; the test VM get
   It always runs `sync-iso.sh` first: the ISO carries **copies** of the repo, and a stale copy
   has shipped before (an old `kimscanning/rules/en.yaml`, caught only by `verify-iso.sh`).
 - The profile is `iso/` (`profiledef.sh`: `iso_name=kimrity`, `uefi.systemd-boot`, squashfs xz);
-  the last build left `iso-out/kimrity-2026.11.17-x86_64.iso` (1.24 GiB, sha256
-  `864a3a9b…`, `verify-iso.sh` 19/19, and a full install/boot/reboot test on a blank 24 GiB disk).
+  the last build left `iso-out/kimrity-2026.11.18-x86_64.iso` (1.24 GiB, sha256
+  `58970869…`, `verify-iso.sh` 19/19, and a full install/boot/reboot test on a blank 24 GiB disk).
   `iso-out/` holds exactly one ISO: delete the old one after the new one verifies.
 - `iso/README.md` documents the profile (required files, build command, `-cdrom` gotcha).
   `iso/pacman.conf` is required by
@@ -150,8 +150,8 @@ Two traps worth knowing on a fresh install:
 
 | Path | Contents |
 |---|---|
-| `~/.config/hypr/{hyprland.lua,hypridle.conf,hyprlock.conf}`, `~/.config/{kitty,waybar,wofi,quickshell/kimrity}`, `~/.config/kimrity/workspaces.conf` | Hyprland; idle (lock 5 min, DPMS off 15 min); lock screen; apps, bar, launcher, menu, F1–F3 presets |
-| `~/.local/bin/` | `lock`, `menu-toggle`, `cliphist-menu`, `powermenu`, `screenshot`, `wallpaper`, `workspace-launch`, `kimrity-{apps,flatpak,gate,icons,menu,tools,ws}` — **not on `PATH`** (the shipped `bash_profile` adds nothing), so call them by full path, as Hyprland does |
+| `~/.config/hypr/{hyprland.lua,hypridle.conf,hyprlock.conf}`, `~/.config/{kitty,waybar,quickshell/kimrity}`, `~/.config/kimrity/workspaces.conf` | Hyprland; idle (lock 5 min, DPMS off 15 min); lock screen; apps, bar, launcher, menu, F1–F3 presets |
+| `~/.local/bin/` | `lock`, `menu-toggle`, `cliphist-menu`, `powermenu`, `screenshot`, `wallpaper`, `workspace-launch`, `kimrity-{apps,flatpak,gate,icons,tools,ws}` — **not on `PATH`** (the shipped `bash_profile` adds nothing), so call them by full path, as Hyprland does |
 | `~/.bash_profile` | `exec Hyprland` on tty1 only (no `DISPLAY`, `WAYLAND_DISPLAY`, `SSH_CONNECTION`, not already running) |
 | `/usr/local/bin/`, `/usr/local/share/{kimscanning,kimai,kimlogpipe}/`, `/usr/share/doc/kimrity/` | `kimrity-gate` (= `gate/gate.py`), `kimscan`, `kimai`, `kimlogpipe`, `semgrep` symlink (if the venv build worked), `nuclei`; scanner rules, `config.example.toml`, pipeline `rules.yaml`, READMEs, usage docs |
 | `/usr/lib/systemd/user/*.service`, `/etc/systemd/user/default.target.wants/`, `/etc/systemd/system/getty@tty1.service.d/autologin.conf`, `/etc/systemd/zram-generator.conf` | user units + links, autologin, zram |
@@ -237,14 +237,16 @@ what `tools/qemu-install-test.sh` is for — a blank 24 GiB disk, the live ISO, 
 through the QEMU monitor, then a real boot of the installed system:
 
 ```sh
+./tests/part.sh                        # unit test: /dev/vda1 vs /dev/nvme0n1p1 vs /dev/mmcblk0p1
 ./tools/qemu-install-test.sh install   # blank disk -> installer -> 12/12 -> password -> SSH key -> poweroff
 ./tools/qemu-install-test.sh boot      # same disk, no ISO -> waits for SSH to come up
 ```
 
 Requires `qemu-system-x86_64`, `edk2-ovmf`, `socat`, `tesseract`, `imagemagick`, `python3`, `curl`.
 Nothing runs as root and the host disks are never touched (the target is a file). Useful overrides:
-`BASE` (scratch dir), `ISO`, `DISK`, `SSH_PORT`, `VM_MEM_MB`, `VM_CPUS`, `WHEELS_DIR` (local pip
-wheelhouse for semgrep) — the defaults pick the newest ISO in `iso-out/` and a temp directory.
+`BASE` (scratch dir), `ISO`, `DISK`, `DISK_SIZE` (default `24G`), `SSH_PORT`, `VM_MEM_MB`, `VM_CPUS`,
+`WHEELS_DIR` (local pip wheelhouse for semgrep) — the defaults pick the newest ISO in `iso-out/` and a
+temp directory. Point `DISK` at a real filesystem when `/tmp` is a small tmpfs.
 
 After `boot` succeeds, the health checks run *inside* the installed system:
 
@@ -253,8 +255,9 @@ scp -P <SSH_PORT> -i "$BASE/vmkey" tools/verify-installed.sh hayqal@127.0.0.1:~/
 ssh -p <SSH_PORT> -i "$BASE/vmkey" hayqal@127.0.0.1 'bash ~/verify-installed.sh'   # 66 checks
 ```
 
-The reference run (17 Nov, Build 14): install `Done` on a blank 24 GiB disk, boot with no ISO in
-~15 s, desktop up, **66/66** checks (RAM 686 MiB, disk 2740 MB), `systemctl reboot`, `boot_id`
-changed, SSH back in ~6 s, **66/66 again** with `systemctl --failed` and `--user --failed` both 0,
-boot **7.804 s**. Hardening was proven inside the installed system, not assumed: 22 audit rules loaded
-(`auditctl -l`), `PasswordAuthentication no`, `kptr_restrict=2`.
+The reference run (18 Nov, Build 15): install `Done` on a blank 24 GiB disk (nuclei v3.11.1 with a
+verified sha256, semgrep from the local wheelhouse), boot with no ISO, **66/66** checks (RAM 620 MiB,
+disk 2.7 GB), `systemctl reboot`, `boot_id` `0df943c3…` -> `3bb5ccbc…`, SSH back in ~15 s, **66/66
+again** with `systemctl --failed` and `--user --failed` both 0, boot **8.291 s** (11.938 s on the
+first boot). Hardening was proven inside the installed system, not assumed: 22 audit rules
+(`auditctl -l`), `PasswordAuthentication no`, `PermitRootLogin prohibit-password`, `kptr_restrict=2`.

@@ -39,7 +39,10 @@ if [ "$(id -u)" -eq 0 ] && [ "${KIMRITY_DROPPED:-0}" != 1 ]; then
     exit 2
   fi
   script=$(readlink -f "$0")
-  exec su -l "$target" -c "KIMRITY_DROPPED=1 XDG_RUNTIME_DIR=/run/user/$(id -u "$target") exec bash $(printf '%q' "$script") $*"
+  # Quote each argument: an unquoted $* merges "two words" into two arguments.
+  cmd="KIMRITY_DROPPED=1 XDG_RUNTIME_DIR=/run/user/$(id -u "$target") exec bash $(printf '%q' "$script")"
+  for a in "$@"; do cmd+=" $(printf '%q' "$a")"; done
+  exec su -l "$target" -c "$cmd"
 fi
 
 pass=0; fail=0

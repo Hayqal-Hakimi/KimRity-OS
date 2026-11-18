@@ -24,7 +24,7 @@
 #   ./tools/qemu-install-test.sh stop      # power the VM off
 #
 # Env overrides: BASE (scratch dir), ISO, DISK, MON, SER, SSH_PORT, WHEELS_PORT,
-#                WHEELS_DIR, VM_MEM_MB, VM_CPUS, TARGET_DISK (guest block device),
+#                WHEELS_DIR, VM_MEM_MB, VM_CPUS, DISK_SIZE, TARGET_DISK (guest block device),
 #                TEST_USER, TEST_PASS.
 # Nothing is hardcoded to one machine: the ISO defaults to the newest build in
 # this repo's iso-out/, and BASE defaults to a temp directory.
@@ -35,6 +35,7 @@ BASE=${BASE:-${TMPDIR:-/tmp}/kimrity-test}
 mkdir -p "$BASE"
 ISO=${ISO:-$(ls -1t "$REPO"/iso-out/kimrity-*.iso 2>/dev/null | head -1)}
 DISK=${DISK:-$BASE/testdisk.img}
+DISK_SIZE=${DISK_SIZE:-24G}
 MON=${MON:-$BASE/vm.sock}
 SER=${SER:-$BASE/vm-serial.log}
 SSH_PORT=${SSH_PORT:-2223}
@@ -123,7 +124,8 @@ qemu_start() {  # $1 = with-iso | disk-only
 case "$MODE" in
 install)
   ensure_key
-  rm -f "$DISK"; truncate -s 24G "$DISK"
+  rm -f "$DISK"; truncate -s "$DISK_SIZE" "$DISK"
+  say "blank disk: $DISK ($DISK_SIZE)"
 
   # local wheelhouse: offline pip needs a reachable index, and plain http is not
   # "trusted" by pip unless we say so (that exact failure aborted the first run)

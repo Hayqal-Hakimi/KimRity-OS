@@ -14,7 +14,7 @@ iso/
     ├── etc/motd
     └── root/              carried into the live ISO (written by tools/sync-iso.sh):
         ├── install.sh     the installer (12 steps)
-        ├── dotfiles/      Hyprland (Lua), waybar, kitty, wofi, quickshell, local-bin
+        ├── dotfiles/      Hyprland (Lua), waybar, kitty, quickshell, local-bin
         ├── hardening/     audit rules, sysctl, sshd (installed by step 12)
         ├── gate/          Security Gate (gate.py + README)
         ├── kimai/         approval broker (user unit)

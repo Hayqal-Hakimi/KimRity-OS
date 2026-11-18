@@ -210,6 +210,11 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# nuclei is not packaged by Arch: one pinned release asset. The hash is fixed
+# here on purpose (no env override) — an override would defeat the check.
+NUCLEI_VERSION=3.11.1
+NUCLEI_SHA256=ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6
+
 # partition: /dev/vda1 but /dev/nvme0n1p1
 part() {
   case "$DISK" in
@@ -415,6 +420,9 @@ ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
 hwclock --systohc
 
 sed -i "s/^#${LOCALE//./\\.} UTF-8/${LOCALE} UTF-8/" /etc/locale.gen
+# Not listed in locale.gen is not an error: sed changes nothing, locale-gen makes
+# nothing, and LANG then points at a locale that does not exist.
+grep -qx "$LOCALE UTF-8" /etc/locale.gen || echo "$LOCALE UTF-8" >> /etc/locale.gen
 locale-gen
 printf 'LANG=%s\n' "$LOCALE" > /etc/locale.conf
 printf 'KEYMAP=%s\n' "$KEYMAP" > /etc/vconsole.conf
@@ -543,7 +551,7 @@ install_dotfiles() {
     warn "dotfiles missing — skipped"; return 0
   fi
   if [ "$DRY" = 1 ]; then
-    printf '[dry] cp %s/{hypr,kitty,waybar,quickshell,wofi} -> %s/home/%s/.config/ ; kimrity/workspaces.conf -> ~/.config/kimrity/ ; bash_profile -> ~/.bash_profile\n' \
+    printf '[dry] cp %s/{hypr,kitty,waybar,quickshell} -> %s/home/%s/.config/ ; kimrity/workspaces.conf -> ~/.config/kimrity/ ; bash_profile -> ~/.bash_profile\n' \
       "$DOTFILES_DIR" "$MOUNTPOINT" "$USERNAME"
     return 0
   fi
@@ -551,7 +559,7 @@ install_dotfiles() {
   local home="$MOUNTPOINT/home/$USERNAME"
   install -d -m 755 "$home/.config"
   local d
-  for d in hypr kitty waybar quickshell wofi; do
+  for d in hypr kitty waybar quickshell; do
     [ -d "$DOTFILES_DIR/$d" ] || continue
     install -d "$home/.config/$d"
     cp -a "$DOTFILES_DIR/$d/." "$home/.config/$d/"
@@ -746,10 +754,11 @@ install_gate_tools() {
   # lesson, 14 Nov), so the archive must live in /var/tmp to survive the
   # curl -> unzip handoff.
   if arch-chroot "$MOUNTPOINT" sh -c \
-      'curl -fsSL --retry 4 --retry-delay 3 --retry-all-errors -o /var/tmp/nuclei.zip https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip'; then
+      "curl -fsSL --retry 4 --retry-delay 3 --retry-all-errors -o /var/tmp/nuclei.zip https://github.com/projectdiscovery/nuclei/releases/download/v$NUCLEI_VERSION/nuclei_${NUCLEI_VERSION}_linux_amd64.zip \
+       && echo '$NUCLEI_SHA256  /var/tmp/nuclei.zip' | sha256sum -c -"; then
     if arch-chroot "$MOUNTPOINT" sh -c 'unzip -o /var/tmp/nuclei.zip -d /usr/local/bin/ nuclei'; then
       arch-chroot "$MOUNTPOINT" chmod +x /usr/local/bin/nuclei || true
-      info "nuclei installed (pinned v3.11.1)"
+      info "nuclei installed (pinned v$NUCLEI_VERSION, sha256 verified)"
     else
       warn "nuclei archive could not be unpacked — install it later (web scans flag it)"
     fi
@@ -763,7 +772,7 @@ install_kim_services() {
   # KimAI + KimLogPipe: the two tools that were still dormant after build 11.
   # Both ship in the default profile: the OS is meant to explain itself, and
   # neither tool costs anything while idle.
-  step "12/12 KimAI broker + KimLogPipe live pipeline (systemd user units)"
+  step "12/12 KimAI + KimLogPipe live pipeline + hardening drop-ins (sysctl, sshd, audit)"
 
   if [ "$DRY" = 1 ]; then
     printf '[dry] kimai + kimlogpipe -> /usr/local/bin (mode 755)\n'
